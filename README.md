@@ -11,7 +11,7 @@ An Ollama bot made for E-mail. You can ask local models stuff via e-mail.
 ```
 ```
 Usage of ./janeGPT:
- -admin string
+  -admin string
         only accepted recipient/sender address
   -archive string
         Archive Maildir path, relative to -maildir unless absolute (default "Archive")
