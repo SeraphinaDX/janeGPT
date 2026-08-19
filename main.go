@@ -13,6 +13,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"mime/quotedprintable"
+	"net"
 	"net/http"
 	"net/mail"
 	"net/textproto"
@@ -20,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -55,6 +57,8 @@ type config struct {
 	Subject        string
 	MaxMessageSize int64
 	MaxBodySize    int64
+	PageTimeout    time.Duration
+	MaxPageSize    int64
 }
 
 type ollamaRequest struct {
@@ -69,12 +73,21 @@ type ollamaResponse struct {
 	Error    string `json:"error,omitempty"`
 }
 
+type attachment struct {
+	Name        string
+	ContentType string
+	Data        []byte
+}
+
 var (
 	breakTagRE = regexp.MustCompile(`(?i)<\s*(br\s*/?|/p|/div|/li|/tr|/h[1-6])\s*>`)
 	tagRE      = regexp.MustCompile(`(?s)<[^>]*>`)
 	scriptRE   = regexp.MustCompile(`(?is)<script\b[^>]*>.*?</script\s*>`)
 	styleRE    = regexp.MustCompile(`(?is)<style\b[^>]*>.*?</style\s*>`)
 	multiNLRE  = regexp.MustCompile(`\n{3,}`)
+	urlRE      = regexp.MustCompile(`https?://[^\s<>"\']+`)
+	titleRE    = regexp.MustCompile(`(?is)<title\b[^>]*>(.*?)</title\s*>`)
+	linkRE     = regexp.MustCompile(`(?is)<a\b[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a\s*>`)
 )
 
 func main() {
@@ -138,6 +151,8 @@ func parseFlags() config {
 	flag.StringVar(&cfg.Subject, "subject", envOr("MAILBOT_SUBJECT", "Ollama response"), "static subject for replies")
 	flag.Int64Var(&cfg.MaxMessageSize, "max-message-bytes", envInt64("MAILBOT_MAX_MESSAGE_BYTES", 10<<20), "maximum incoming message file size")
 	flag.Int64Var(&cfg.MaxBodySize, "max-body-bytes", envInt64("MAILBOT_MAX_BODY_BYTES", 2<<20), "maximum decoded prompt body size")
+	flag.DurationVar(&cfg.PageTimeout, "page-timeout", envDuration("MAILBOT_PAGE_TIMEOUT", 30*time.Second), "timeout for fetching each URL")
+	flag.Int64Var(&cfg.MaxPageSize, "max-page-bytes", envInt64("MAILBOT_MAX_PAGE_BYTES", 10<<20), "maximum downloaded HTML page size")
 	flag.Parse()
 	return cfg
 }
@@ -189,8 +204,11 @@ func validateConfig(cfg *config) error {
 	if cfg.Model == "" {
 		return errors.New("-model must not be empty")
 	}
-	if cfg.MaxBodySize <= 0 || cfg.MaxMessageSize <= 0 {
-		return errors.New("message/body size limits must be positive")
+	if cfg.MaxBodySize <= 0 || cfg.MaxMessageSize <= 0 || cfg.MaxPageSize <= 0 {
+		return errors.New("message/body/page size limits must be positive")
+	}
+	if cfg.PageTimeout <= 0 {
+		return errors.New("page timeout must be positive")
 	}
 	u, err := url.Parse(cfg.OllamaURL)
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -287,6 +305,7 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	if err != nil {
 		return fmt.Errorf("extract body: %w", err)
 	}
+	body = stripEmailSignature(body)
 	body = strings.TrimSpace(body)
 	if body == "" {
 		status(cYellow, "SKIP", "message has an empty text body; archiving")
@@ -296,8 +315,21 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 		return nil
 	}
 
-	status(cCyan, "OLLAMA", "prompting model %q with %d body bytes", cfg.Model, len(body))
-	response, err := askOllama(ctx, client, cfg, body)
+	urls := findURLs(body)
+	attachments := make([]attachment, 0, len(urls))
+	for _, rawURL := range urls {
+		status(cBlue, "FETCH", "%s", rawURL)
+		att, err := fetchOrgAttachment(ctx, cfg, rawURL)
+		if err != nil {
+			return fmt.Errorf("fetch %s: %w", rawURL, err)
+		}
+		attachments = append(attachments, att)
+		status(cGreen, "ORG", "%s -> %s (%d bytes)", rawURL, att.Name, len(att.Data))
+	}
+
+	prompt := replaceURLsForModel(body)
+	status(cCyan, "OLLAMA", "prompting model %q with %d body bytes", cfg.Model, len(prompt))
+	response, err := askOllama(ctx, client, cfg, prompt)
 	if err != nil {
 		return err
 	}
@@ -310,7 +342,7 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	// Important: only the model response is placed in the outgoing message body.
 	// The incoming prompt/body is never appended or quoted here.
 	status(cBlue, "SEND", "sending model response to %s using msmtp", recipient)
-	if err := sendWithMSMTP(ctx, cfg, recipient, response); err != nil {
+	if err := sendWithMSMTP(ctx, cfg, recipient, response, attachments); err != nil {
 		return fmt.Errorf("msmtp failed: %w", err)
 	}
 	status(cGreen, "SEND", "response sent")
@@ -358,7 +390,7 @@ func askOllama(ctx context.Context, client *http.Client, cfg config, prompt stri
 	return out.Response, nil
 }
 
-func sendWithMSMTP(ctx context.Context, cfg config, recipient, modelResponse string) error {
+func sendWithMSMTP(ctx context.Context, cfg config, recipient, modelResponse string, attachments []attachment) error {
 	var msg bytes.Buffer
 	msg.WriteString("To: " + recipient + "\r\n")
 	if cfg.From != "" {
@@ -367,12 +399,43 @@ func sendWithMSMTP(ctx context.Context, cfg config, recipient, modelResponse str
 	msg.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
 	msg.WriteString("Subject: " + cfg.Subject + "\r\n")
 	msg.WriteString("MIME-Version: 1.0\r\n")
-	msg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
-	msg.WriteString("Content-Transfer-Encoding: 8bit\r\n")
-	msg.WriteString("\r\n")
-	msg.WriteString(modelResponse)
-	if !strings.HasSuffix(modelResponse, "\n") {
-		msg.WriteString("\r\n")
+
+	if len(attachments) == 0 {
+		msg.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
+		msg.WriteString("Content-Transfer-Encoding: 8bit\r\n\r\n")
+		msg.WriteString(modelResponse)
+		if !strings.HasSuffix(modelResponse, "\n") {
+			msg.WriteString("\r\n")
+		}
+	} else {
+		mw := multipart.NewWriter(&msg)
+		msg.WriteString("Content-Type: multipart/mixed; boundary=\"" + mw.Boundary() + "\"\r\n\r\n")
+
+		textHeader := make(textproto.MIMEHeader)
+		textHeader.Set("Content-Type", "text/plain; charset=UTF-8")
+		textHeader.Set("Content-Transfer-Encoding", "8bit")
+		part, err := mw.CreatePart(textHeader)
+		if err != nil {
+			return err
+		}
+		if _, err := io.WriteString(part, modelResponse+"\r\n"); err != nil {
+			return err
+		}
+
+		for _, att := range attachments {
+			h := make(textproto.MIMEHeader)
+			h.Set("Content-Type", mime.FormatMediaType(att.ContentType, map[string]string{"charset": "UTF-8", "name": att.Name}))
+			h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": att.Name}))
+			h.Set("Content-Transfer-Encoding", "base64")
+			part, err := mw.CreatePart(h)
+			if err != nil {
+				return err
+			}
+			writeMIMEBase64(part, att.Data)
+		}
+		if err := mw.Close(); err != nil {
+			return err
+		}
 	}
 
 	args := make([]string, 0, 4)
@@ -381,6 +444,17 @@ func sendWithMSMTP(ctx context.Context, cfg config, recipient, modelResponse str
 	}
 	args = append(args, "--", recipient)
 	return runCommand(ctx, cfg.MSMTP, msg.Bytes(), args...)
+}
+
+func writeMIMEBase64(w io.Writer, data []byte) {
+	encoded := base64.StdEncoding.EncodeToString(data)
+	for len(encoded) > 76 {
+		fmt.Fprint(w, encoded[:76], "\r\n")
+		encoded = encoded[76:]
+	}
+	if encoded != "" {
+		fmt.Fprint(w, encoded, "\r\n")
+	}
 }
 
 func runCommand(ctx context.Context, program string, stdin []byte, args ...string) error {
@@ -632,6 +706,185 @@ func htmlToText(s string) string {
 	s = strings.ReplaceAll(s, "\r\n", "\n")
 	s = multiNLRE.ReplaceAllString(s, "\n\n")
 	return strings.TrimSpace(s)
+}
+
+func findURLs(body string) []string {
+	matches := urlRE.FindAllString(body, -1)
+	seen := make(map[string]bool, len(matches))
+	out := make([]string, 0, len(matches))
+	for _, raw := range matches {
+		raw = strings.TrimRight(raw, ".,;:!?)]}")
+		if raw == "" || seen[raw] {
+			continue
+		}
+		seen[raw] = true
+		out = append(out, raw)
+	}
+	return out
+}
+
+func replaceURLsForModel(body string) string {
+	return strings.TrimSpace(urlRE.ReplaceAllStringFunc(body, func(raw string) string {
+		trail := ""
+		clean := strings.TrimRight(raw, ".,;:!?)]}")
+		if len(clean) < len(raw) {
+			trail = raw[len(clean):]
+		}
+		return "[web page copied to an Org-mode attachment by janeGPT]" + trail
+	}))
+}
+
+func fetchOrgAttachment(ctx context.Context, cfg config, rawURL string) (attachment, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return attachment{}, err
+	}
+	if err := validateFetchURL(u); err != nil {
+		return attachment{}, err
+	}
+
+	client := &http.Client{
+		Timeout: cfg.PageTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			return validateFetchURL(req.URL)
+		},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return attachment{}, err
+	}
+	req.Header.Set("User-Agent", "janeGPT/1.0")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml;q=0.9")
+	resp, err := client.Do(req)
+	if err != nil {
+		return attachment{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return attachment{}, fmt.Errorf("HTTP %s", resp.Status)
+	}
+	mediaType, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if mediaType != "" && mediaType != "text/html" && mediaType != "application/xhtml+xml" {
+		return attachment{}, fmt.Errorf("URL returned %s, not HTML", mediaType)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, cfg.MaxPageSize+1))
+	if err != nil {
+		return attachment{}, err
+	}
+	if int64(len(data)) > cfg.MaxPageSize {
+		return attachment{}, fmt.Errorf("page exceeds %d bytes", cfg.MaxPageSize)
+	}
+	org := htmlPageToOrg(string(data), resp.Request.URL)
+	return attachment{
+		Name:        orgFilename(resp.Request.URL),
+		ContentType: "text/org",
+		Data:        []byte(org),
+	}, nil
+}
+
+func validateFetchURL(u *url.URL) error {
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("only http and https URLs are allowed")
+	}
+	if u.Hostname() == "" {
+		return errors.New("URL has no hostname")
+	}
+	ips, err := net.LookupIP(u.Hostname())
+	if err != nil {
+		return fmt.Errorf("resolve hostname: %w", err)
+	}
+	for _, ip := range ips {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("refusing non-public address %s", ip)
+		}
+	}
+	return nil
+}
+
+func htmlPageToOrg(src string, base *url.URL) string {
+	title := "Web page"
+	if m := titleRE.FindStringSubmatch(src); len(m) == 2 {
+		title = strings.TrimSpace(htmlToText(m[1]))
+	}
+
+	src = scriptRE.ReplaceAllString(src, "")
+	src = styleRE.ReplaceAllString(src, "")
+	for level := 6; level >= 1; level-- {
+		re := regexp.MustCompile(fmt.Sprintf(`(?is)<h%d\b[^>]*>(.*?)</h%d\s*>`, level, level))
+		src = re.ReplaceAllStringFunc(src, func(block string) string {
+			m := re.FindStringSubmatch(block)
+			return "\n" + strings.Repeat("*", level) + " " + strings.TrimSpace(htmlToText(m[1])) + "\n"
+		})
+	}
+	src = linkRE.ReplaceAllStringFunc(src, func(block string) string {
+		m := linkRE.FindStringSubmatch(block)
+		if len(m) != 3 {
+			return htmlToText(block)
+		}
+		href := strings.TrimSpace(html.UnescapeString(m[1]))
+		text := strings.TrimSpace(htmlToText(m[2]))
+		ref, err := url.Parse(href)
+		if err == nil {
+			href = base.ResolveReference(ref).String()
+		}
+		if text == "" || text == href {
+			return "[[" + href + "]]"
+		}
+		return "[[" + href + "][" + text + "]]"
+	})
+	preRE := regexp.MustCompile(`(?is)<pre\b[^>]*>(.*?)</pre\s*>`)
+	src = preRE.ReplaceAllStringFunc(src, func(block string) string {
+		m := preRE.FindStringSubmatch(block)
+		return "\n#+begin_example\n" + strings.TrimSpace(html.UnescapeString(tagRE.ReplaceAllString(m[1], ""))) + "\n#+end_example\n"
+	})
+	liRE := regexp.MustCompile(`(?i)<li\b[^>]*>`)
+	src = liRE.ReplaceAllString(src, "\n- ")
+	blockRE := regexp.MustCompile(`(?i)</?(p|div|section|article|main|ul|ol|blockquote|br)\b[^>]*>`)
+	src = blockRE.ReplaceAllString(src, "\n")
+	src = tagRE.ReplaceAllString(src, "")
+	src = html.UnescapeString(src)
+	src = strings.ReplaceAll(src, "\r\n", "\n")
+	src = multiNLRE.ReplaceAllString(src, "\n\n")
+	src = strings.TrimSpace(src)
+	return fmt.Sprintf("#+title: %s\n#+source: %s\n\n%s\n", title, base.String(), src)
+}
+
+func orgFilename(u *url.URL) string {
+	name := path.Base(u.Path)
+	if name == "." || name == "/" || name == "" {
+		name = u.Hostname()
+	}
+	if ext := path.Ext(name); ext != "" {
+		name = strings.TrimSuffix(name, ext)
+	}
+	name = regexp.MustCompile(`[^A-Za-z0-9._-]+`).ReplaceAllString(name, "-")
+	name = strings.Trim(name, "-._")
+	if name == "" {
+		name = "page"
+	}
+	return name + ".org"
+}
+
+func stripEmailSignature(body string) string {
+	body = strings.ReplaceAll(body, "\r\n", "\n")
+	lines := strings.Split(body, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if line == "-- " || trimmed == "--" ||
+			lower == "sent from grapheneos" ||
+			lower == "sent from my iphone" ||
+			lower == "sent from my ipad" ||
+			lower == "sent from my android" ||
+			lower == "get outlook for ios" ||
+			lower == "get outlook for android" {
+			return strings.TrimSpace(strings.Join(lines[:i], "\n"))
+		}
+	}
+	return strings.TrimSpace(body)
 }
 
 func status(color, label, format string, args ...any) {
