@@ -1,3 +1,3 @@
-module git.cerberusgames.ca/Starstreak/janeGPT
+module mailbot
 
 go 1.22
