@@ -12,7 +12,7 @@ An Ollama bot made for E-mail. You can ask local models stuff via e-mail.
 ```
 Usage of ./janeGPT:
   -admin string
-        only accepted recipient/sender address
+        only accepted sender address unless -reply-anyone is enabled
   -archive string
         Archive Maildir path, relative to -maildir unless absolute (default "Archive")
   -from string
@@ -35,6 +35,11 @@ Usage of ./janeGPT:
         offlineimap executable (default "offlineimap")
   -ollama-url string
         Ollama base URL (default "http://127.0.0.1:11434")
+  -personality string
+        system/personality prompt sent to Ollama
+  -reply-anyone
+        reply to any sender instead of only the configured admin
   -subject string
         static subject for replies (default "Ollama response")
+
 ```
