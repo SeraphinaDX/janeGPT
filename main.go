@@ -43,7 +43,9 @@ type config struct {
 	MaildirRoot    string
 	ArchivePath    string
 	AdminEmail     string
+	ReplyAnyone    bool
 	Model          string
+	Personality    string
 	OllamaURL      string
 	Interval       time.Duration
 	OfflineIMAP    string
@@ -58,6 +60,7 @@ type config struct {
 type ollamaRequest struct {
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
+	System string `json:"system,omitempty"`
 	Stream bool   `json:"stream"`
 }
 
@@ -85,6 +88,14 @@ func main() {
 	defer stop()
 
 	status(cCyan, "START", "mailbot using model %q; maildir=%s", cfg.Model, cfg.MaildirRoot)
+	if cfg.Personality != "" {
+		status(cCyan, "PERSONA", "custom personality enabled")
+	}
+	if cfg.ReplyAnyone {
+		status(cYellow, "MODE", "reply-to-anyone is enabled")
+	} else {
+		status(cGreen, "MODE", "admin-only mode")
+	}
 	if cfg.Interval > 0 {
 		status(cBlue, "LOOP", "checking mail every %s", cfg.Interval)
 	} else {
@@ -114,8 +125,10 @@ func parseFlags() config {
 	var cfg config
 	flag.StringVar(&cfg.MaildirRoot, "maildir", envOr("MAILBOT_MAILDIR", ""), "Maildir root")
 	flag.StringVar(&cfg.ArchivePath, "archive", envOr("MAILBOT_ARCHIVE", "Archive"), "Archive Maildir path, relative to -maildir unless absolute")
-	flag.StringVar(&cfg.AdminEmail, "admin", envOr("MAILBOT_ADMIN", ""), "only accepted recipient/sender address")
+	flag.StringVar(&cfg.AdminEmail, "admin", envOr("MAILBOT_ADMIN", ""), "only accepted sender address unless -reply-anyone is enabled")
+	flag.BoolVar(&cfg.ReplyAnyone, "reply-anyone", false, "reply to any sender instead of only the configured admin")
 	flag.StringVar(&cfg.Model, "model", envOr("OLLAMA_MODEL", "llama3.2"), "Ollama model")
+	flag.StringVar(&cfg.Personality, "personality", "", "system/personality prompt sent to Ollama")
 	flag.StringVar(&cfg.OllamaURL, "ollama-url", envOr("OLLAMA_URL", "http://127.0.0.1:11434"), "Ollama base URL")
 	flag.DurationVar(&cfg.Interval, "interval", envDuration("MAILBOT_INTERVAL", time.Minute), "scan interval; 0 means run once")
 	flag.StringVar(&cfg.OfflineIMAP, "offlineimap", envOr("OFFLINEIMAP_BIN", "offlineimap"), "offlineimap executable")
@@ -152,13 +165,16 @@ func validateConfig(cfg *config) error {
 	cfg.ArchivePath = filepath.Clean(archive)
 
 	if cfg.AdminEmail == "" {
-		return errors.New("-admin (or MAILBOT_ADMIN) is required")
+		if !cfg.ReplyAnyone {
+			return errors.New("-admin (or MAILBOT_ADMIN) is required unless -reply-anyone is enabled")
+		}
+	} else {
+		admin, err := mail.ParseAddress(cfg.AdminEmail)
+		if err != nil {
+			return fmt.Errorf("invalid admin address: %w", err)
+		}
+		cfg.AdminEmail = strings.ToLower(admin.Address)
 	}
-	admin, err := mail.ParseAddress(cfg.AdminEmail)
-	if err != nil {
-		return fmt.Errorf("invalid admin address: %w", err)
-	}
-	cfg.AdminEmail = strings.ToLower(admin.Address)
 
 	if cfg.From != "" {
 		from, err := mail.ParseAddress(cfg.From)
@@ -241,7 +257,17 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 		return fmt.Errorf("invalid From header: %w", err)
 	}
 
-	if !strings.EqualFold(from.Address, cfg.AdminEmail) {
+	if cfg.ReplyAnyone && cfg.From != "" && strings.EqualFold(from.Address, cfg.From) {
+		f.Close()
+		status(cYellow, "SKIP", "sender %q matches the bot From address; archiving to avoid a mail loop", from.Address)
+		if err := archiveMessage(path, cfg.ArchivePath); err != nil {
+			return fmt.Errorf("archive self-sent message: %w", err)
+		}
+		status(cGreen, "ARCHIVE", "%s", filepath.Base(path))
+		return nil
+	}
+
+	if !cfg.ReplyAnyone && !strings.EqualFold(from.Address, cfg.AdminEmail) {
 		f.Close()
 		status(cYellow, "SKIP", "sender %q is not the configured admin; archiving without prompting Ollama", from.Address)
 		if err := archiveMessage(path, cfg.ArchivePath); err != nil {
@@ -251,6 +277,11 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 		return nil
 	}
 
+	recipient := cfg.AdminEmail
+	if cfg.ReplyAnyone {
+		recipient = from.Address
+	}
+
 	body, err := extractBody(textproto.MIMEHeader(msg.Header), msg.Body, cfg.MaxBodySize)
 	f.Close()
 	if err != nil {
@@ -258,7 +289,7 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	}
 	body = strings.TrimSpace(body)
 	if body == "" {
-		status(cYellow, "SKIP", "admin message has an empty text body; archiving")
+		status(cYellow, "SKIP", "message has an empty text body; archiving")
 		if err := archiveMessage(path, cfg.ArchivePath); err != nil {
 			return fmt.Errorf("archive empty message: %w", err)
 		}
@@ -278,8 +309,8 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 
 	// Important: only the model response is placed in the outgoing message body.
 	// The incoming prompt/body is never appended or quoted here.
-	status(cBlue, "SEND", "sending model response to %s using msmtp", cfg.AdminEmail)
-	if err := sendWithMSMTP(ctx, cfg, response); err != nil {
+	status(cBlue, "SEND", "sending model response to %s using msmtp", recipient)
+	if err := sendWithMSMTP(ctx, cfg, recipient, response); err != nil {
 		return fmt.Errorf("msmtp failed: %w", err)
 	}
 	status(cGreen, "SEND", "response sent")
@@ -293,7 +324,7 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 }
 
 func askOllama(ctx context.Context, client *http.Client, cfg config, prompt string) (string, error) {
-	payload, err := json.Marshal(ollamaRequest{Model: cfg.Model, Prompt: prompt, Stream: false})
+	payload, err := json.Marshal(ollamaRequest{Model: cfg.Model, Prompt: prompt, System: cfg.Personality, Stream: false})
 	if err != nil {
 		return "", err
 	}
@@ -327,9 +358,9 @@ func askOllama(ctx context.Context, client *http.Client, cfg config, prompt stri
 	return out.Response, nil
 }
 
-func sendWithMSMTP(ctx context.Context, cfg config, modelResponse string) error {
+func sendWithMSMTP(ctx context.Context, cfg config, recipient, modelResponse string) error {
 	var msg bytes.Buffer
-	msg.WriteString("To: " + cfg.AdminEmail + "\r\n")
+	msg.WriteString("To: " + recipient + "\r\n")
 	if cfg.From != "" {
 		msg.WriteString("From: " + cfg.From + "\r\n")
 	}
@@ -348,7 +379,7 @@ func sendWithMSMTP(ctx context.Context, cfg config, modelResponse string) error 
 	if cfg.MSMTPAccount != "" {
 		args = append(args, "-a", cfg.MSMTPAccount)
 	}
-	args = append(args, "--", cfg.AdminEmail)
+	args = append(args, "--", recipient)
 	return runCommand(ctx, cfg.MSMTP, msg.Bytes(), args...)
 }
 
