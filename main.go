@@ -42,6 +42,12 @@ const (
 )
 
 type config struct {
+	SyncCommand    string
+	SyncArgs       commandArgs
+	SendCommand    string
+	SendArgs       commandArgs
+	NoSync         bool
+	CommandTimeout time.Duration
 	MaildirRoot    string
 	ArchivePath    string
 	AdminEmail     string
@@ -155,6 +161,12 @@ func parseFlags() config {
 	flag.DurationVar(&cfg.PageTimeout, "page-timeout", envDuration("MAILBOT_PAGE_TIMEOUT", 30*time.Second), "timeout for fetching each URL")
 	flag.Int64Var(&cfg.MaxPageSize, "max-page-bytes", envInt64("MAILBOT_MAX_PAGE_BYTES", 10<<20), "maximum downloaded HTML page size")
 	flag.Int64Var(&cfg.MaxWebContext, "max-web-context-bytes", envInt64("MAILBOT_MAX_WEB_CONTEXT_BYTES", 128<<10), "maximum Org-mode webpage text included in the Ollama prompt")
+	flag.StringVar(&cfg.SyncCommand, "sync-command", envOr("MAILBOT_SYNC_COMMAND", ""), "mail receive executable; overrides -offlineimap")
+	flag.Var(&cfg.SyncArgs, "sync-arg", "argument for -sync-command (repeat for each argument)")
+	flag.StringVar(&cfg.SendCommand, "send-command", envOr("MAILBOT_SEND_COMMAND", ""), "mail send executable; reads complete message on stdin; overrides -msmtp")
+	flag.Var(&cfg.SendArgs, "send-arg", "argument for -send-command (repeat); {recipient} expands to reply address")
+	flag.BoolVar(&cfg.NoSync, "no-sync", false, "scan Maildir without running a receive command")
+	flag.DurationVar(&cfg.CommandTimeout, "command-timeout", 10*time.Minute, "timeout for each mail receive/send command")
 	flag.Parse()
 	return cfg
 }
@@ -217,15 +229,16 @@ func validateConfig(cfg *config) error {
 		return fmt.Errorf("invalid -ollama-url %q", cfg.OllamaURL)
 	}
 	cfg.OllamaURL = strings.TrimRight(cfg.OllamaURL, "/")
+	if err := validateMailCommands(cfg); err != nil {
+		return err
+	}
 	return ensureMaildir(cfg.ArchivePath)
 }
 
 func runCycle(ctx context.Context, cfg config) error {
-	status(cBlue, "SYNC", "running %s", cfg.OfflineIMAP)
-	if err := runCommand(ctx, cfg.OfflineIMAP, nil); err != nil {
-		return fmt.Errorf("offlineimap failed: %w", err)
+	if err := receiveMail(ctx, cfg); err != nil {
+		return err
 	}
-	status(cGreen, "SYNC", "offlineimap completed")
 
 	messages, err := findMessages(cfg.MaildirRoot, cfg.ArchivePath)
 	if err != nil {
@@ -343,13 +356,14 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 
 	// Important: only the model response is placed in the outgoing message body.
 	// The incoming prompt/body is never appended or quoted here.
-	status(cBlue, "SEND", "sending model response to %s using msmtp", recipient)
-	if err := sendWithMSMTP(ctx, cfg, recipient, response, attachments); err != nil {
-		return fmt.Errorf("msmtp failed: %w", err)
+	program, _ := sendCommand(cfg, recipient)
+	status(cBlue, "SEND", "sending model response to %s using %s", recipient, program)
+	if err := sendMail(ctx, cfg, recipient, response, attachments); err != nil {
+		return fmt.Errorf("mail send command failed: %w", err)
 	}
 	status(cGreen, "SEND", "response sent")
 
-	// Archive only after successful delivery, so temporary Ollama/msmtp failures can retry.
+	// Archive only after successful delivery, so temporary Ollama/mail-send failures can retry.
 	if err := archiveMessage(path, cfg.ArchivePath); err != nil {
 		return fmt.Errorf("archive processed message: %w", err)
 	}
@@ -392,7 +406,7 @@ func askOllama(ctx context.Context, client *http.Client, cfg config, prompt stri
 	return out.Response, nil
 }
 
-func sendWithMSMTP(ctx context.Context, cfg config, recipient, modelResponse string, attachments []attachment) error {
+func sendMail(ctx context.Context, cfg config, recipient, modelResponse string, attachments []attachment) error {
 	var msg bytes.Buffer
 	msg.WriteString("To: " + recipient + "\r\n")
 	if cfg.From != "" {
@@ -440,12 +454,8 @@ func sendWithMSMTP(ctx context.Context, cfg config, recipient, modelResponse str
 		}
 	}
 
-	args := make([]string, 0, 4)
-	if cfg.MSMTPAccount != "" {
-		args = append(args, "-a", cfg.MSMTPAccount)
-	}
-	args = append(args, "--", recipient)
-	return runCommand(ctx, cfg.MSMTP, msg.Bytes(), args...)
+	program, args := sendCommand(cfg, recipient)
+	return runMailCommand(ctx, cfg.CommandTimeout, program, msg.Bytes(), args...)
 }
 
 func writeMIMEBase64(w io.Writer, data []byte) {
@@ -461,6 +471,8 @@ func writeMIMEBase64(w io.Writer, data []byte) {
 
 func runCommand(ctx context.Context, program string, stdin []byte, args ...string) error {
 	cmd := exec.CommandContext(ctx, program, args...)
+	// Descendants must not keep inherited output pipes open indefinitely.
+	cmd.WaitDelay = 2 * time.Second
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
