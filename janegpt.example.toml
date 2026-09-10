@@ -1,7 +1,7 @@
-# Copy to janegpt.toml, edit your addresses, then run ./janeGPT.
-# Mail account credentials belong in your mail programs' own configuration.
+# Copy this file to janegpt.toml, edit it, then run ./janeGPT.
+# Account credentials belong in the mail programs' own configuration.
 maildir = "~/Maildir"
-archive = "Archive" # Relative to maildir, unless absolute.
+archive = "Archive" # Relative to maildir unless absolute.
 admin = "you@example.org"
 reply_anyone = false
 from = "bot@example.org"
@@ -11,27 +11,22 @@ interval = "1m" # Use "0s" for a single scan.
 # Ollama
 model = "llama3.2"
 ollama_url = "http://127.0.0.1:11434"
-personality = "" # TOML multiline strings also work here.
+personality = ""
 
-# Receive: any foreground command that updates the Maildir above.
-sync_command = "MailSalonSync"
-sync_args = ["-plain", "sync"]
-no_sync = false
+# Each command is an argv array: executable first, then its arguments.
+# Use [] for sync_command if another service already updates this Maildir.
+sync_command = ["MailSalonSync", "-plain", "sync"]
+send_command = ["msmtp", "--", "{recipient}"]
 command_timeout = "10m"
-# Alternative: sync_command = "mbsync", sync_args = ["-a"]
-# For externally synchronized mail: no_sync = true, sync_command = "", sync_args = []
 
-# Send: reads a complete RFC 5322/MIME email on standard input.
-# Empty send_command uses msmtp and its standard arguments.
-send_command = ""
-send_args = []
-msmtp = "msmtp"
-msmtp_account = ""
-# Alternative: send_command = "/usr/sbin/sendmail", send_args = ["-t", "-i"]
-# Use "{recipient}" as a whole argument if your sender needs a reply address.
-
-# Legacy receive executable, used only when sync_command is empty.
-offlineimap = "offlineimap"
+# Other receive examples:
+# sync_command = ["mbsync", "-a"]
+# sync_command = ["offlineimap", "-c", "/home/you/.config/offlineimap/config"]
+#
+# A sender that reads the recipient from the To header:
+# send_command = ["/usr/sbin/sendmail", "-t", "-i"]
+#
+# {recipient} is replaced only when it is a complete argument.
 
 # Limits (bytes) and webpage fetch timeout.
 max_message_bytes = 10485760

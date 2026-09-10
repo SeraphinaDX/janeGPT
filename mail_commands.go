@@ -18,39 +18,24 @@ func (a *commandArgs) Set(value string) error {
 }
 
 func validateMailCommands(cfg *config) error {
-	if (cfg.SyncCommand != "" && strings.TrimSpace(cfg.SyncCommand) == "") || (cfg.SendCommand != "" && strings.TrimSpace(cfg.SendCommand) == "") {
-		return errors.New("custom mail executable must not be whitespace")
-	}
 	if cfg.CommandTimeout <= 0 {
-		return errors.New("-command-timeout must be positive")
+		return errors.New("command_timeout must be positive")
 	}
-	if len(cfg.SyncArgs) > 0 && cfg.SyncCommand == "" {
-		return errors.New("-sync-arg requires -sync-command (or MAILBOT_SYNC_COMMAND)")
+	if len(cfg.SyncCommand) > 0 && strings.TrimSpace(cfg.SyncCommand[0]) == "" {
+		return errors.New("sync_command executable must not be empty")
 	}
-	if len(cfg.SendArgs) > 0 && cfg.SendCommand == "" {
-		return errors.New("-send-arg requires -send-command (or MAILBOT_SEND_COMMAND)")
-	}
-	if cfg.NoSync && (cfg.SyncCommand != "" || len(cfg.SyncArgs) > 0) {
-		return errors.New("-no-sync cannot be combined with a custom sync command")
-	}
-	if !cfg.NoSync && strings.TrimSpace(cfg.SyncCommand) == "" && strings.TrimSpace(cfg.OfflineIMAP) == "" {
-		return errors.New("mail receive executable must not be empty")
-	}
-	if strings.TrimSpace(cfg.SendCommand) == "" && strings.TrimSpace(cfg.MSMTP) == "" {
-		return errors.New("mail send executable must not be empty")
+	if len(cfg.SendCommand) == 0 || strings.TrimSpace(cfg.SendCommand[0]) == "" {
+		return errors.New("send_command must contain an executable")
 	}
 	return nil
 }
 
 func receiveMail(ctx context.Context, cfg config) error {
-	if cfg.NoSync {
+	if len(cfg.SyncCommand) == 0 {
 		status(cCyan, "SYNC", "scanning existing Maildir; receive command disabled")
 		return ctx.Err()
 	}
-	program, args := cfg.SyncCommand, []string(cfg.SyncArgs)
-	if program == "" {
-		program = cfg.OfflineIMAP
-	}
+	program, args := cfg.SyncCommand[0], cfg.SyncCommand[1:]
 	status(cBlue, "SYNC", "running %s; waiting for mail receive to finish", program)
 	if err := runMailCommand(ctx, cfg.CommandTimeout, program, nil, args...); err != nil {
 		return fmt.Errorf("mail receive command %q failed: %w", program, err)
@@ -60,21 +45,14 @@ func receiveMail(ctx context.Context, cfg config) error {
 }
 
 func sendCommand(cfg config, recipient string) (string, []string) {
-	if cfg.SendCommand != "" {
-		args := append([]string(nil), cfg.SendArgs...)
-		for i, arg := range args {
-			// Only a whole argument is a placeholder; no shell expansion.
-			if arg == "{recipient}" {
-				args[i] = recipient
-			}
+	args := append([]string(nil), cfg.SendCommand[1:]...)
+	for i, arg := range args {
+		// Only a whole argument is a placeholder; no shell expansion.
+		if arg == "{recipient}" {
+			args[i] = recipient
 		}
-		return cfg.SendCommand, args
 	}
-	args := []string{}
-	if cfg.MSMTPAccount != "" {
-		args = append(args, "-a", cfg.MSMTPAccount)
-	}
-	return cfg.MSMTP, append(args, "--", recipient)
+	return cfg.SendCommand[0], args
 }
 
 func runMailCommand(ctx context.Context, timeout time.Duration, program string, stdin []byte, args ...string) error {
