@@ -33,10 +33,8 @@ command_timeout = "3m"
 reply_anyone = true
 personality = """First line.
 Second line."""
-sync_command = "receiver"
-sync_args = ["sync", "a path with spaces"]
-send_command = "sender"
-send_args = ["{recipient}"]
+sync_command = ["receiver", "sync", "a path with spaces"]
+send_command = ["sender", "{recipient}"]
 `)
 	cfg, err := loadConfig([]string{"-config=" + p}, io.Discard)
 	if err != nil {
@@ -45,20 +43,20 @@ send_args = ["{recipient}"]
 	if cfg.Model != "file-model" || cfg.Interval != 0 || cfg.PageTimeout != 2*time.Second || cfg.CommandTimeout != 3*time.Minute || !cfg.ReplyAnyone || !strings.Contains(cfg.Personality, "\n") {
 		t.Fatalf("unexpected config: %+v", cfg)
 	}
-	if !filepath.IsAbs(cfg.MaildirRoot) || !reflect.DeepEqual(cfg.SyncArgs, commandArgs{"sync", "a path with spaces"}) {
+	if !filepath.IsAbs(cfg.MaildirRoot) || !reflect.DeepEqual(cfg.SyncCommand, commandArgs{"receiver", "sync", "a path with spaces"}) {
 		t.Fatalf("paths/args: %+v", cfg)
 	}
-	cfg, err = loadConfig([]string{"-model=cli-model", "-config", p, "-reply-anyone=false", "-sync-arg=new", "-sync-arg=", "-send-arg=-t"}, io.Discard)
+	cfg, err = loadConfig([]string{"-model=cli-model", "-config", p, "-reply-anyone=false", "-sync-command=new", "-sync-command=", "-send-command=other", "-send-command=-t"}, io.Discard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Model != "cli-model" || cfg.ReplyAnyone || !reflect.DeepEqual(cfg.SyncArgs, commandArgs{"new", ""}) || !reflect.DeepEqual(cfg.SendArgs, commandArgs{"-t"}) {
+	if cfg.Model != "cli-model" || cfg.ReplyAnyone || !reflect.DeepEqual(cfg.SyncCommand, commandArgs{"new", ""}) || !reflect.DeepEqual(cfg.SendCommand, commandArgs{"other", "-t"}) {
 		t.Fatalf("overrides: %+v", cfg)
 	}
 }
 
 func TestTOMLConfigErrors(t *testing.T) {
-	for _, body := range []string{`modle = "typo"`, `interval = "later"`, `sync_args = "sync"`, `reply_anyone = "yes"`, `model = "a"
+	for _, body := range []string{`modle = "typo"`, `interval = "later"`, `sync_command = "sync"`, `reply_anyone = "yes"`, `model = "a"
 model = "b"`, `model = [`} {
 		p := configFile(t, body)
 		if _, err := loadConfig([]string{"-config=" + p}, io.Discard); err == nil {

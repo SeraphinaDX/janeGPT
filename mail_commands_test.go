@@ -53,13 +53,14 @@ func helperConfig(t *testing.T, mode string) (config, string) {
 	t.Setenv("JANEGPT_COMMAND_HELPER", "1")
 	t.Setenv("JANEGPT_CAPTURE", capture)
 	args := commandArgs{"-test.run=^TestMailCommandHelper$", "--", mode}
-	return config{SyncCommand: executable, SyncArgs: args, SendCommand: executable, SendArgs: args, CommandTimeout: 5 * time.Second}, capture
+	command := append(commandArgs{executable}, args...)
+	return config{SyncCommand: command, SendCommand: command, CommandTimeout: 5 * time.Second}, capture
 }
 
 func TestReceiveCommandArgumentsAndCompletion(t *testing.T) {
 	cfg, capture := helperConfig(t, "receive")
 	want := []string{"sync", "-config=/a folder/config.toml", "$(touch unwanted)", "", "--plain"}
-	cfg.SyncArgs = append(cfg.SyncArgs, want...)
+	cfg.SyncCommand = append(cfg.SyncCommand, want...)
 	if err := receiveMail(context.Background(), cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -99,22 +100,18 @@ func TestMailCommandTimeoutAndCancellation(t *testing.T) {
 }
 
 func TestNoSync(t *testing.T) {
-	if err := receiveMail(context.Background(), config{NoSync: true, OfflineIMAP: "missing-command"}); err != nil {
+	if err := receiveMail(context.Background(), config{}); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func TestSendCommandDefaultsAndRecipient(t *testing.T) {
-	program, args := sendCommand(config{MSMTP: "custom-msmtp", MSMTPAccount: "personal"}, "a@example.org")
-	if program != "custom-msmtp" || !reflect.DeepEqual(args, []string{"-a", "personal", "--", "a@example.org"}) {
-		t.Fatalf("%s %q", program, args)
-	}
-	cfg := config{SendCommand: "sender", SendArgs: commandArgs{"send", "{recipient}"}, MSMTPAccount: "ignored"}
-	program, args = sendCommand(cfg, "b@example.org")
+func TestSendCommandRecipient(t *testing.T) {
+	cfg := config{SendCommand: commandArgs{"sender", "send", "{recipient}"}}
+	program, args := sendCommand(cfg, "b@example.org")
 	if program != "sender" || !reflect.DeepEqual(args, []string{"send", "b@example.org"}) {
 		t.Fatalf("%s %q", program, args)
 	}
-	if cfg.SendArgs[1] != "{recipient}" {
+	if cfg.SendCommand[2] != "{recipient}" {
 		t.Fatal("configuration mutated")
 	}
 }
@@ -140,17 +137,15 @@ func TestCustomSenderReceivesMIME(t *testing.T) {
 }
 
 func TestValidateMailCommands(t *testing.T) {
-	base := config{OfflineIMAP: "offlineimap", MSMTP: "msmtp", CommandTimeout: time.Minute}
+	base := config{SendCommand: commandArgs{"sender"}, CommandTimeout: time.Minute}
 	if err := validateMailCommands(&base); err != nil {
 		t.Fatal(err)
 	}
 	for _, mutate := range []func(*config){
 		func(c *config) { c.CommandTimeout = 0 },
-		func(c *config) { c.SyncArgs = commandArgs{"sync"} },
-		func(c *config) { c.SendArgs = commandArgs{"send"} },
-		func(c *config) { c.NoSync = true; c.SyncCommand = "sync" },
-		func(c *config) { c.OfflineIMAP = "" },
-		func(c *config) { c.MSMTP = "" },
+		func(c *config) { c.SyncCommand = commandArgs{""} },
+		func(c *config) { c.SendCommand = nil },
+		func(c *config) { c.SendCommand = commandArgs{"  "} },
 	} {
 		cfg := base
 		mutate(&cfg)

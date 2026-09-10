@@ -42,11 +42,8 @@ const (
 )
 
 type config struct {
-	SyncCommand    string        `toml:"sync_command"`
-	SyncArgs       commandArgs   `toml:"sync_args"`
-	SendCommand    string        `toml:"send_command"`
-	SendArgs       commandArgs   `toml:"send_args"`
-	NoSync         bool          `toml:"no_sync"`
+	SyncCommand    commandArgs   `toml:"sync_command"`
+	SendCommand    commandArgs   `toml:"send_command"`
 	CommandTimeout time.Duration `toml:"command_timeout"`
 	MaildirRoot    string        `toml:"maildir"`
 	ArchivePath    string        `toml:"archive"`
@@ -56,9 +53,6 @@ type config struct {
 	Personality    string        `toml:"personality"`
 	OllamaURL      string        `toml:"ollama_url"`
 	Interval       time.Duration `toml:"interval"`
-	OfflineIMAP    string        `toml:"offlineimap"`
-	MSMTP          string        `toml:"msmtp"`
-	MSMTPAccount   string        `toml:"msmtp_account"`
 	From           string        `toml:"from"`
 	Subject        string        `toml:"subject"`
 	MaxMessageSize int64         `toml:"max_message_bytes"`
