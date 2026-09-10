@@ -42,24 +42,29 @@ const (
 )
 
 type config struct {
-	SyncCommand    commandArgs   `toml:"sync_command"`
-	SendCommand    commandArgs   `toml:"send_command"`
-	CommandTimeout time.Duration `toml:"command_timeout"`
-	MaildirRoot    string        `toml:"maildir"`
-	ArchivePath    string        `toml:"archive"`
-	AdminEmail     string        `toml:"admin"`
-	ReplyAnyone    bool          `toml:"reply_anyone"`
-	Model          string        `toml:"model"`
-	Personality    string        `toml:"personality"`
-	OllamaURL      string        `toml:"ollama_url"`
-	Interval       time.Duration `toml:"interval"`
-	From           string        `toml:"from"`
-	Subject        string        `toml:"subject"`
-	MaxMessageSize int64         `toml:"max_message_bytes"`
-	MaxBodySize    int64         `toml:"max_body_bytes"`
-	PageTimeout    time.Duration `toml:"page_timeout"`
-	MaxPageSize    int64         `toml:"max_page_bytes"`
-	MaxWebContext  int64         `toml:"max_web_context_bytes"`
+	SyncCommand        commandArgs   `toml:"sync_command"`
+	SendCommand        commandArgs   `toml:"send_command"`
+	CommandTimeout     time.Duration `toml:"command_timeout"`
+	MaildirRoot        string        `toml:"maildir"`
+	ArchivePath        string        `toml:"archive"`
+	FailedPath         string        `toml:"failed"`
+	StateDir           string        `toml:"state_dir"`
+	MaxAttempts        int           `toml:"max_attempts"`
+	RetryBackoff       time.Duration `toml:"retry_backoff"`
+	CompletedRetention time.Duration `toml:"completed_retention"`
+	AdminEmail         string        `toml:"admin"`
+	ReplyAnyone        bool          `toml:"reply_anyone"`
+	Model              string        `toml:"model"`
+	Personality        string        `toml:"personality"`
+	OllamaURL          string        `toml:"ollama_url"`
+	Interval           time.Duration `toml:"interval"`
+	From               string        `toml:"from"`
+	Subject            string        `toml:"subject"`
+	MaxMessageSize     int64         `toml:"max_message_bytes"`
+	MaxBodySize        int64         `toml:"max_body_bytes"`
+	PageTimeout        time.Duration `toml:"page_timeout"`
+	MaxPageSize        int64         `toml:"max_page_bytes"`
+	MaxWebContext      int64         `toml:"max_web_context_bytes"`
 }
 
 type ollamaRequest struct {
@@ -79,6 +84,13 @@ type attachment struct {
 	ContentType string
 	Data        []byte
 }
+
+type messageDisposition int
+
+const (
+	dispositionArchive messageDisposition = iota
+	dispositionDelivered
+)
 
 var (
 	breakTagRE = regexp.MustCompile(`(?i)<\s*(br\s*/?|/p|/div|/li|/tr|/h[1-6])\s*>`)
@@ -155,14 +167,36 @@ func validateConfig(cfg *config) error {
 	if cfg.ArchivePath == "" {
 		return errors.New("-archive must not be empty")
 	}
-	if !filepath.IsAbs(cfg.ArchivePath) {
-		cfg.ArchivePath = filepath.Join(cfg.MaildirRoot, cfg.ArchivePath)
+	if cfg.FailedPath == "" {
+		return errors.New("-failed must not be empty")
 	}
-	archive, err := filepath.Abs(cfg.ArchivePath)
+	for name, value := range map[string]*string{"archive": &cfg.ArchivePath, "failed": &cfg.FailedPath} {
+		if !filepath.IsAbs(*value) {
+			*value = filepath.Join(cfg.MaildirRoot, *value)
+		}
+		absolute, err := filepath.Abs(*value)
+		if err != nil {
+			return fmt.Errorf("resolve %s Maildir: %w", name, err)
+		}
+		*value = filepath.Clean(absolute)
+	}
+	if cfg.ArchivePath == cfg.FailedPath {
+		return errors.New("archive and failed Maildirs must be different")
+	}
+	if cfg.StateDir == "" {
+		return errors.New("-state-dir must not be empty")
+	}
+	stateDir, err := filepath.Abs(cfg.StateDir)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve state directory: %w", err)
 	}
-	cfg.ArchivePath = filepath.Clean(archive)
+	cfg.StateDir = filepath.Clean(stateDir)
+	if cfg.MaxAttempts <= 0 {
+		return errors.New("-max-attempts must be positive")
+	}
+	if cfg.RetryBackoff <= 0 || cfg.CompletedRetention <= 0 {
+		return errors.New("retry backoff and completed retention must be positive")
+	}
 
 	if cfg.AdminEmail == "" {
 		if !cfg.ReplyAnyone {
@@ -203,7 +237,13 @@ func validateConfig(cfg *config) error {
 	if err := validateMailCommands(cfg); err != nil {
 		return err
 	}
-	return ensureMaildir(cfg.ArchivePath)
+	if err := ensureMaildir(cfg.ArchivePath); err != nil {
+		return err
+	}
+	if err := ensureMaildir(cfg.FailedPath); err != nil {
+		return err
+	}
+	return os.MkdirAll(cfg.StateDir, 0700)
 }
 
 func runCycle(ctx context.Context, cfg config) error {
@@ -211,12 +251,20 @@ func runCycle(ctx context.Context, cfg config) error {
 		return err
 	}
 
-	messages, err := findMessages(cfg.MaildirRoot, cfg.ArchivePath)
+	ledger, err := openDeliveryLedger(cfg.StateDir)
+	if err != nil {
+		return err
+	}
+	if err := ledger.pruneCompleted(time.Now().Add(-cfg.CompletedRetention)); err != nil {
+		return fmt.Errorf("prune delivery state: %w", err)
+	}
+
+	messages, err := findMessages(cfg.MaildirRoot, cfg.ArchivePath, cfg.FailedPath)
 	if err != nil {
 		return fmt.Errorf("scan maildir: %w", err)
 	}
 	if len(messages) == 0 {
-		status(cCyan, "MAIL", "no messages found outside Archive")
+		status(cCyan, "MAIL", "no messages found outside Archive and Failed")
 		return nil
 	}
 	status(cCyan, "MAIL", "found %d message(s)", len(messages))
@@ -226,59 +274,130 @@ func runCycle(ctx context.Context, cfg config) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := processMessage(ctx, client, cfg, path); err != nil {
-			status(cRed, "FAIL", "%s: %v", path, err)
+		key, err := messageKey(path)
+		if err != nil {
+			status(cRed, "FAIL", "%s: identify message: %v", path, err)
+			continue
 		}
+		now := time.Now()
+		record, exists := ledger.get(key)
+		if exists {
+			switch record.Status {
+			case statusDelivered:
+				status(cYellow, "RECOVER", "%s was already delivered; archiving without resending", filepath.Base(path))
+				if err := archiveMessage(path, cfg.ArchivePath); err != nil {
+					status(cRed, "FAIL", "%s: archive delivered message: %v", path, err)
+				} else {
+					status(cGreen, "ARCHIVE", "%s", filepath.Base(path))
+				}
+				continue
+			case statusQuarantined:
+				if err := archiveMessage(path, cfg.FailedPath); err != nil {
+					status(cRed, "FAIL", "%s: quarantine message: %v", path, err)
+				} else {
+					status(cYellow, "QUARANTINE", "%s: %s", filepath.Base(path), record.LastError)
+				}
+				continue
+			case statusRetry:
+				if now.Before(record.NextAttempt) {
+					status(cYellow, "RETRY", "%s: attempt %d/%d at %s (%s)", filepath.Base(path), record.Attempts+1, cfg.MaxAttempts, record.NextAttempt.Format(time.RFC3339), record.LastError)
+					continue
+				}
+			default:
+				status(cRed, "FAIL", "%s: unknown delivery status %q", path, record.Status)
+				continue
+			}
+		}
+
+		disposition, err := processMessage(ctx, client, cfg, path)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			now = time.Now()
+			attempts := record.Attempts + 1
+			updated := messageState{Status: statusRetry, Attempts: attempts, LastError: stateError(err), UpdatedAt: now}
+			if attempts >= cfg.MaxAttempts {
+				updated.Status = statusQuarantined
+				if saveErr := ledger.put(key, updated); saveErr != nil {
+					status(cRed, "FAIL", "%s: %v; save quarantine state: %v", path, err, saveErr)
+					continue
+				}
+				if moveErr := archiveMessage(path, cfg.FailedPath); moveErr != nil {
+					status(cRed, "FAIL", "%s: quarantined after %d attempts but move failed: %v", path, attempts, moveErr)
+				} else {
+					status(cYellow, "QUARANTINE", "%s after %d attempts: %v", filepath.Base(path), attempts, err)
+				}
+				continue
+			}
+			updated.NextAttempt = now.Add(retryDelay(cfg.RetryBackoff, attempts))
+			if saveErr := ledger.put(key, updated); saveErr != nil {
+				status(cRed, "FAIL", "%s: %v; save retry state: %v", path, err, saveErr)
+				continue
+			}
+			status(cRed, "FAIL", "%s: attempt %d/%d failed: %v; retry at %s", path, attempts, cfg.MaxAttempts, err, updated.NextAttempt.Format(time.RFC3339))
+			continue
+		}
+
+		if disposition == dispositionDelivered {
+			now = time.Now()
+			delivered := messageState{Status: statusDelivered, Attempts: record.Attempts + 1, UpdatedAt: now}
+			if err := ledger.put(key, delivered); err != nil {
+				if archiveErr := archiveMessage(path, cfg.ArchivePath); archiveErr != nil {
+					status(cRed, "FAIL", "%s: reply sent, but recording delivery failed (%v) and archiving failed (%v); a duplicate reply is possible", path, err, archiveErr)
+				} else {
+					status(cYellow, "RECOVER", "%s: reply sent and archived, but delivery state was not saved: %v", filepath.Base(path), err)
+				}
+				continue
+			}
+		}
+		if err := archiveMessage(path, cfg.ArchivePath); err != nil {
+			status(cRed, "FAIL", "%s: archive processed message: %v", path, err)
+			continue
+		}
+		status(cGreen, "ARCHIVE", "%s", filepath.Base(path))
 	}
 	return nil
 }
 
-func processMessage(ctx context.Context, client *http.Client, cfg config, path string) error {
+func processMessage(ctx context.Context, client *http.Client, cfg config, path string) (messageDisposition, error) {
 	status(cBlue, "READ", "%s", path)
 
 	info, err := os.Stat(path)
 	if err != nil {
-		return err
+		return dispositionArchive, err
 	}
 	if info.Size() > cfg.MaxMessageSize {
-		return fmt.Errorf("message is %d bytes, over limit %d", info.Size(), cfg.MaxMessageSize)
+		return dispositionArchive, fmt.Errorf("message is %d bytes, over limit %d", info.Size(), cfg.MaxMessageSize)
 	}
 
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return dispositionArchive, err
 	}
 	msg, err := mail.ReadMessage(f)
 	if err != nil {
 		f.Close()
-		return fmt.Errorf("parse message: %w", err)
+		return dispositionArchive, fmt.Errorf("parse message: %w", err)
 	}
 
 	fromHeader := msg.Header.Get("From")
 	from, err := mail.ParseAddress(fromHeader)
 	if err != nil {
 		f.Close()
-		return fmt.Errorf("invalid From header: %w", err)
+		return dispositionArchive, fmt.Errorf("invalid From header: %w", err)
 	}
 
 	if cfg.ReplyAnyone && cfg.From != "" && strings.EqualFold(from.Address, cfg.From) {
 		f.Close()
 		status(cYellow, "SKIP", "sender %q matches the bot From address; archiving to avoid a mail loop", from.Address)
-		if err := archiveMessage(path, cfg.ArchivePath); err != nil {
-			return fmt.Errorf("archive self-sent message: %w", err)
-		}
-		status(cGreen, "ARCHIVE", "%s", filepath.Base(path))
-		return nil
+		return dispositionArchive, nil
 	}
 
 	if !cfg.ReplyAnyone && !strings.EqualFold(from.Address, cfg.AdminEmail) {
 		f.Close()
 		status(cYellow, "SKIP", "sender %q is not the configured admin; archiving without prompting Ollama", from.Address)
-		if err := archiveMessage(path, cfg.ArchivePath); err != nil {
-			return fmt.Errorf("archive unauthorized message: %w", err)
-		}
-		status(cGreen, "ARCHIVE", "%s", filepath.Base(path))
-		return nil
+		return dispositionArchive, nil
 	}
 
 	fallbackRecipient := cfg.AdminEmail
@@ -288,23 +407,20 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	recipients, err := replyRecipients(msg.Header, fallbackRecipient)
 	if err != nil {
 		f.Close()
-		return err
+		return dispositionArchive, err
 	}
 	reply := buildReplyHeaders(msg.Header, cfg.Subject)
 
 	body, err := extractBody(textproto.MIMEHeader(msg.Header), msg.Body, cfg.MaxBodySize)
 	f.Close()
 	if err != nil {
-		return fmt.Errorf("extract body: %w", err)
+		return dispositionArchive, fmt.Errorf("extract body: %w", err)
 	}
 	body = stripEmailSignature(body)
 	body = strings.TrimSpace(body)
 	if body == "" {
 		status(cYellow, "SKIP", "message has an empty text body; archiving")
-		if err := archiveMessage(path, cfg.ArchivePath); err != nil {
-			return fmt.Errorf("archive empty message: %w", err)
-		}
-		return nil
+		return dispositionArchive, nil
 	}
 
 	urls := findURLs(body)
@@ -313,7 +429,7 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 		status(cBlue, "FETCH", "%s", rawURL)
 		att, err := fetchOrgAttachment(ctx, cfg, rawURL)
 		if err != nil {
-			return fmt.Errorf("fetch %s: %w", rawURL, err)
+			return dispositionArchive, fmt.Errorf("fetch %s: %w", rawURL, err)
 		}
 		attachments = append(attachments, att)
 		status(cGreen, "ORG", "%s -> %s (%d bytes)", rawURL, att.Name, len(att.Data))
@@ -323,11 +439,11 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	status(cCyan, "OLLAMA", "prompting model %q with %d prompt bytes (%d web page(s) as context)", cfg.Model, len(prompt), len(attachments))
 	response, err := askOllama(ctx, client, cfg, prompt, len(attachments) > 0)
 	if err != nil {
-		return err
+		return dispositionArchive, err
 	}
 	response = strings.TrimSpace(response)
 	if response == "" {
-		return errors.New("Ollama returned an empty response")
+		return dispositionArchive, errors.New("Ollama returned an empty response")
 	}
 	status(cGreen, "OLLAMA", "received %d response bytes", len(response))
 
@@ -336,16 +452,11 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	program, _ := sendCommand(cfg, recipients)
 	status(cBlue, "SEND", "sending model response to %s using %s", strings.Join(recipients, ", "), program)
 	if err := sendMail(ctx, cfg, recipients, reply, response, attachments); err != nil {
-		return fmt.Errorf("mail send command failed: %w", err)
+		return dispositionArchive, fmt.Errorf("mail send command failed: %w", err)
 	}
 	status(cGreen, "SEND", "response sent")
 
-	// Archive only after successful delivery, so temporary Ollama/mail-send failures can retry.
-	if err := archiveMessage(path, cfg.ArchivePath); err != nil {
-		return fmt.Errorf("archive processed message: %w", err)
-	}
-	status(cGreen, "ARCHIVE", "%s", filepath.Base(path))
-	return nil
+	return dispositionDelivered, nil
 }
 
 func askOllama(ctx context.Context, client *http.Client, cfg config, prompt string, hasWebContext bool) (string, error) {
@@ -475,15 +586,18 @@ func runCommand(ctx context.Context, program string, stdin []byte, args ...strin
 	return nil
 }
 
-func findMessages(root, archive string) ([]string, error) {
-	archive = filepath.Clean(archive)
+func findMessages(root string, excluded ...string) ([]string, error) {
+	excludedDirs := make(map[string]bool, len(excluded))
+	for _, dir := range excluded {
+		excludedDirs[filepath.Clean(dir)] = true
+	}
 	var out []string
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		clean := filepath.Clean(path)
-		if d.IsDir() && clean == archive {
+		if d.IsDir() && excludedDirs[clean] {
 			return filepath.SkipDir
 		}
 		if !d.IsDir() || (d.Name() != "new" && d.Name() != "cur") {
@@ -525,7 +639,7 @@ func looksLikeMaildir(dir string) bool {
 func ensureMaildir(dir string) error {
 	for _, name := range []string{"cur", "new", "tmp"} {
 		if err := os.MkdirAll(filepath.Join(dir, name), 0700); err != nil {
-			return fmt.Errorf("create Archive maildir: %w", err)
+			return fmt.Errorf("create Maildir %s: %w", dir, err)
 		}
 	}
 	return nil
