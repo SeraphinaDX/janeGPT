@@ -1,0 +1,41 @@
+# Copy to janegpt.toml, edit your addresses, then run ./janeGPT.
+# Mail account credentials belong in your mail programs' own configuration.
+maildir = "~/Maildir"
+archive = "Archive" # Relative to maildir, unless absolute.
+admin = "you@example.org"
+reply_anyone = false
+from = "bot@example.org"
+subject = "Ollama response"
+interval = "1m" # Use "0s" for a single scan.
+
+# Ollama
+model = "llama3.2"
+ollama_url = "http://127.0.0.1:11434"
+personality = "" # TOML multiline strings also work here.
+
+# Receive: any foreground command that updates the Maildir above.
+sync_command = "MailSalonSync"
+sync_args = ["-plain", "sync"]
+no_sync = false
+command_timeout = "10m"
+# Alternative: sync_command = "mbsync", sync_args = ["-a"]
+# For externally synchronized mail: no_sync = true, sync_command = "", sync_args = []
+
+# Send: reads a complete RFC 5322/MIME email on standard input.
+# Empty send_command uses msmtp and its standard arguments.
+send_command = ""
+send_args = []
+msmtp = "msmtp"
+msmtp_account = ""
+# Alternative: send_command = "/usr/sbin/sendmail", send_args = ["-t", "-i"]
+# Use "{recipient}" as a whole argument if your sender needs a reply address.
+
+# Legacy receive executable, used only when sync_command is empty.
+offlineimap = "offlineimap"
+
+# Limits (bytes) and webpage fetch timeout.
+max_message_bytes = 10485760
+max_body_bytes = 2097152
+max_page_bytes = 10485760
+max_web_context_bytes = 131072
+page_timeout = "30s"
