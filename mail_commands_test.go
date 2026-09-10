@@ -331,3 +331,35 @@ func TestFailureBackoffAndQuarantine(t *testing.T) {
 		t.Fatalf("quarantine record: %+v, %v", record, ok)
 	}
 }
+
+func TestAttachmentContextAndReportReachReply(t *testing.T) {
+	var request ollamaRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Error(err)
+		}
+		io.WriteString(w, `{"response":"Document summary"}`)
+	}))
+	defer server.Close()
+	helper, capture := helperConfig(t, "send")
+	cfg := testCycleConfig(t, helper.SendCommand, server.URL)
+	message := "From: admin@example.org\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n" +
+		"--b\r\nContent-Disposition: attachment; filename=notes.org\r\n\r\n* Useful notes\r\n" +
+		"--b\r\nContent-Disposition: attachment; filename=photo.png\r\n\r\nimage\r\n--b--\r\n"
+	if err := os.WriteFile(filepath.Join(cfg.MaildirRoot, "new", "attachments"), []byte(message), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := runCycle(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(request.Prompt, "Useful notes") || !strings.Contains(request.System, attachmentSystem) {
+		t.Fatalf("missing document context or system instruction: %+v", request)
+	}
+	if !strings.Contains(string(data), "photo.png") || strings.Contains(string(data), "Useful notes") {
+		t.Fatalf("reply should report skipped file without quoting incoming document: %s", data)
+	}
+}

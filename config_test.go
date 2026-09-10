@@ -30,6 +30,8 @@ model = "file-model"
 interval = "0s"
 page_timeout = "2s"
 command_timeout = "3m"
+max_attachment_bytes = 123
+max_attachment_context_bytes = 456
 failed = "Failed-mail"
 state_dir = "~/state/janeGPT"
 max_attempts = 7
@@ -47,6 +49,9 @@ send_command = ["sender", "{recipient}"]
 	}
 	if cfg.Model != "file-model" || cfg.Interval != 0 || cfg.PageTimeout != 2*time.Second || cfg.CommandTimeout != 3*time.Minute || cfg.MaxAttempts != 7 || cfg.RetryBackoff != 7*time.Minute || cfg.CompletedRetention != 168*time.Hour || !cfg.ReplyAnyone || !strings.Contains(cfg.Personality, "\n") {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if cfg.MaxAttachmentSize != 123 || cfg.MaxAttachmentContext != 456 {
+		t.Fatal("attachment TOML limits not loaded")
 	}
 	if !filepath.IsAbs(cfg.MaildirRoot) || !filepath.IsAbs(cfg.StateDir) || cfg.FailedPath != "Failed-mail" || !reflect.DeepEqual(cfg.SyncCommand, commandArgs{"receiver", "sync", "a path with spaces"}) {
 		t.Fatalf("paths/args: %+v", cfg)

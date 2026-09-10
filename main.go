@@ -42,29 +42,31 @@ const (
 )
 
 type config struct {
-	SyncCommand        commandArgs   `toml:"sync_command"`
-	SendCommand        commandArgs   `toml:"send_command"`
-	CommandTimeout     time.Duration `toml:"command_timeout"`
-	MaildirRoot        string        `toml:"maildir"`
-	ArchivePath        string        `toml:"archive"`
-	FailedPath         string        `toml:"failed"`
-	StateDir           string        `toml:"state_dir"`
-	MaxAttempts        int           `toml:"max_attempts"`
-	RetryBackoff       time.Duration `toml:"retry_backoff"`
-	CompletedRetention time.Duration `toml:"completed_retention"`
-	AdminEmail         string        `toml:"admin"`
-	ReplyAnyone        bool          `toml:"reply_anyone"`
-	Model              string        `toml:"model"`
-	Personality        string        `toml:"personality"`
-	OllamaURL          string        `toml:"ollama_url"`
-	Interval           time.Duration `toml:"interval"`
-	From               string        `toml:"from"`
-	Subject            string        `toml:"subject"`
-	MaxMessageSize     int64         `toml:"max_message_bytes"`
-	MaxBodySize        int64         `toml:"max_body_bytes"`
-	PageTimeout        time.Duration `toml:"page_timeout"`
-	MaxPageSize        int64         `toml:"max_page_bytes"`
-	MaxWebContext      int64         `toml:"max_web_context_bytes"`
+	MaxAttachmentSize    int64         `toml:"max_attachment_bytes"`
+	MaxAttachmentContext int64         `toml:"max_attachment_context_bytes"`
+	SyncCommand          commandArgs   `toml:"sync_command"`
+	SendCommand          commandArgs   `toml:"send_command"`
+	CommandTimeout       time.Duration `toml:"command_timeout"`
+	MaildirRoot          string        `toml:"maildir"`
+	ArchivePath          string        `toml:"archive"`
+	FailedPath           string        `toml:"failed"`
+	StateDir             string        `toml:"state_dir"`
+	MaxAttempts          int           `toml:"max_attempts"`
+	RetryBackoff         time.Duration `toml:"retry_backoff"`
+	CompletedRetention   time.Duration `toml:"completed_retention"`
+	AdminEmail           string        `toml:"admin"`
+	ReplyAnyone          bool          `toml:"reply_anyone"`
+	Model                string        `toml:"model"`
+	Personality          string        `toml:"personality"`
+	OllamaURL            string        `toml:"ollama_url"`
+	Interval             time.Duration `toml:"interval"`
+	From                 string        `toml:"from"`
+	Subject              string        `toml:"subject"`
+	MaxMessageSize       int64         `toml:"max_message_bytes"`
+	MaxBodySize          int64         `toml:"max_body_bytes"`
+	PageTimeout          time.Duration `toml:"page_timeout"`
+	MaxPageSize          int64         `toml:"max_page_bytes"`
+	MaxWebContext        int64         `toml:"max_web_context_bytes"`
 }
 
 type ollamaRequest struct {
@@ -223,7 +225,7 @@ func validateConfig(cfg *config) error {
 	if cfg.Model == "" {
 		return errors.New("-model must not be empty")
 	}
-	if cfg.MaxBodySize <= 0 || cfg.MaxMessageSize <= 0 || cfg.MaxPageSize <= 0 || cfg.MaxWebContext <= 0 {
+	if cfg.MaxAttachmentSize <= 0 || cfg.MaxAttachmentContext <= 0 || cfg.MaxBodySize <= 0 || cfg.MaxMessageSize <= 0 || cfg.MaxPageSize <= 0 || cfg.MaxWebContext <= 0 {
 		return errors.New("message/body/page/web-context size limits must be positive")
 	}
 	if cfg.PageTimeout <= 0 {
@@ -411,14 +413,15 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	}
 	reply := buildReplyHeaders(msg.Header, cfg.Subject)
 
-	body, err := extractBody(textproto.MIMEHeader(msg.Header), msg.Body, cfg.MaxBodySize)
+	incoming := &incomingAttachments{perFile: cfg.MaxAttachmentSize, remaining: cfg.MaxAttachmentContext}
+	body, err := extractPartWithAttachments(textproto.MIMEHeader(msg.Header), msg.Body, cfg.MaxBodySize, 0, incoming)
 	f.Close()
 	if err != nil {
 		return dispositionArchive, fmt.Errorf("extract body: %w", err)
 	}
 	body = stripEmailSignature(body)
 	body = strings.TrimSpace(body)
-	if body == "" {
+	if body == "" && len(incoming.files) == 0 && len(incoming.notes) == 0 {
 		status(cYellow, "SKIP", "message has an empty text body; archiving")
 		return dispositionArchive, nil
 	}
@@ -436,6 +439,10 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	}
 
 	prompt := buildModelPrompt(body, attachments, cfg.MaxWebContext)
+	prompt = incoming.prompt(prompt)
+	if len(incoming.files) > 0 || len(incoming.notes) > 0 {
+		cfg.Personality += "\n\n" + attachmentSystem
+	}
 	status(cCyan, "OLLAMA", "prompting model %q with %d prompt bytes (%d web page(s) as context)", cfg.Model, len(prompt), len(attachments))
 	response, err := askOllama(ctx, client, cfg, prompt, len(attachments) > 0)
 	if err != nil {
@@ -446,6 +453,9 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 		return dispositionArchive, errors.New("Ollama returned an empty response")
 	}
 	status(cGreen, "OLLAMA", "received %d response bytes", len(response))
+	if len(incoming.notes) > 0 {
+		response += "\n\nAttachment report from janeGPT:\n- " + strings.Join(incoming.notes, "\n- ")
+	}
 
 	// Important: only the model response is placed in the outgoing message body.
 	// The incoming prompt/body is never appended or quoted here.
@@ -689,15 +699,12 @@ func extractBody(h textproto.MIMEHeader, r io.Reader, maxBytes int64) (string, e
 }
 
 func extractPart(h textproto.MIMEHeader, r io.Reader, maxBytes int64, depth int) (string, error) {
+	return extractPartWithAttachments(h, r, maxBytes, depth, nil)
+}
+
+func extractPartWithAttachments(h textproto.MIMEHeader, r io.Reader, maxBytes int64, depth int, incoming *incomingAttachments) (string, error) {
 	if depth > 20 {
 		return "", errors.New("MIME nesting too deep")
-	}
-
-	if disp := h.Get("Content-Disposition"); disp != "" {
-		disposition, params, err := mime.ParseMediaType(disp)
-		if err == nil && (strings.EqualFold(disposition, "attachment") || params["filename"] != "") {
-			return "", nil
-		}
 	}
 
 	mediaType := "text/plain"
@@ -708,6 +715,20 @@ func extractPart(h textproto.MIMEHeader, r io.Reader, maxBytes int64, depth int)
 			return "", fmt.Errorf("parse Content-Type: %w", err)
 		}
 		mediaType, params = strings.ToLower(mt), p
+	}
+	disposition, dispositionParams, err := mime.ParseMediaType(h.Get("Content-Disposition"))
+	if h.Get("Content-Disposition") != "" && err != nil {
+		return "", fmt.Errorf("parse Content-Disposition: %w", err)
+	}
+	name := dispositionParams["filename"]
+	if name == "" {
+		name = params["name"]
+	}
+	if strings.EqualFold(disposition, "attachment") || name != "" {
+		if incoming != nil {
+			incoming.read(name, params["charset"], h.Get("Content-Transfer-Encoding"), r)
+		}
+		return "", nil
 	}
 
 	if strings.HasPrefix(mediaType, "multipart/") {
@@ -726,7 +747,7 @@ func extractPart(h textproto.MIMEHeader, r io.Reader, maxBytes int64, depth int)
 				return "", err
 			}
 			partType := strings.ToLower(part.Header.Get("Content-Type"))
-			text, err := extractPart(part.Header, part, maxBytes, depth+1)
+			text, err := extractPartWithAttachments(part.Header, part, maxBytes, depth+1, incoming)
 			part.Close()
 			if err != nil {
 				return "", err
