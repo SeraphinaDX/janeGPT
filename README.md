@@ -17,13 +17,64 @@ Maildir passed to `-maildir`.
 
 ## Usage
 
+### Quick start with TOML
+
+Copy `janegpt.example.toml` to `janegpt.toml` and edit your addresses and mail
+commands. Then run:
+
+```sh
+./janeGPT
+```
+
+janeGPT automatically loads `janegpt.toml` from the current directory. To use
+another file:
+
+```sh
+./janeGPT -config=path/to/janegpt.toml
+```
+
+A minimal configuration using MailSalonSync for receiving and msmtp for sending:
+
+```toml
+maildir = "~/Maildir"
+admin = "you@example.org"
+from = "bot@example.org"
+model = "llama3.2"
+interval = "1m"
+sync_command = "MailSalonSync"
+sync_args = ["-plain", "sync"]
+msmtp = "msmtp"
+```
+
+All existing settings are available in TOML; see the commented example for the
+complete list. Keys use underscores (`reply_anyone`, `command_timeout`), and
+command arguments are arrays (`sync_args`, `send_args`). Durations are strings
+such as `"30s"`, `"1m"`, or `"0s"` for a single scan. Unknown settings, invalid types,
+and malformed files stop startup with an error.
+
+Precedence is **built-in defaults → environment → TOML → explicit switches**.
+Existing scripts continue working without a configuration file. Switches remain
+available for occasional overrides, such as `-interval=0s`. Repeated `-sync-arg`
+or `-send-arg` switches replace the corresponding TOML array. You can also select
+a file with `MAILBOT_CONFIG`; an explicit `-config` takes precedence. A missing
+explicitly selected file is an error.
+
+`~` and `~/` expand in the config filename, Maildir/archive paths, and executable
+paths. Relative paths are resolved from the working directory, with the existing
+exception that `archive` is relative to `maildir`. Argument strings stay literal:
+use absolute paths inside `sync_args` and `send_args`. Configure credentials in
+your mail tools, not in janeGPT's file.
+
+### Optional command-line configuration
+
 ### Choose your mail programs
 
 `-sync-command` takes an executable name or path. Supply each argument separately
 with `-sync-arg`; use the same pattern for sending with `-send-command` and
 `-send-arg`. Commands run directly, without a shell. Paths containing spaces are
 supported when quoted, but shell pipelines, `$VARIABLE` expansion inside argument
-values, and `~` expansion inside quoted paths are not performed by janeGPT.
+values are not performed by janeGPT. Home-directory expansion is supported for
+executable and Maildir/archive paths, but not command argument strings.
 Use an absolute path or a command on `PATH`. A wrapper script can adapt programs
 that require a different interface.
 
@@ -95,6 +146,8 @@ Usage of ./janeGPT:
         only accepted sender address unless -reply-anyone is enabled
   -archive string
         Archive Maildir path, relative to -maildir unless absolute (default "Archive")
+  -config string
+        TOML configuration file (default: janegpt.toml if present)
   -command-timeout duration
         timeout for each mail receive/send command (default 10m0s)
   -from string

@@ -42,30 +42,30 @@ const (
 )
 
 type config struct {
-	SyncCommand    string
-	SyncArgs       commandArgs
-	SendCommand    string
-	SendArgs       commandArgs
-	NoSync         bool
-	CommandTimeout time.Duration
-	MaildirRoot    string
-	ArchivePath    string
-	AdminEmail     string
-	ReplyAnyone    bool
-	Model          string
-	Personality    string
-	OllamaURL      string
-	Interval       time.Duration
-	OfflineIMAP    string
-	MSMTP          string
-	MSMTPAccount   string
-	From           string
-	Subject        string
-	MaxMessageSize int64
-	MaxBodySize    int64
-	PageTimeout    time.Duration
-	MaxPageSize    int64
-	MaxWebContext  int64
+	SyncCommand    string        `toml:"sync_command"`
+	SyncArgs       commandArgs   `toml:"sync_args"`
+	SendCommand    string        `toml:"send_command"`
+	SendArgs       commandArgs   `toml:"send_args"`
+	NoSync         bool          `toml:"no_sync"`
+	CommandTimeout time.Duration `toml:"command_timeout"`
+	MaildirRoot    string        `toml:"maildir"`
+	ArchivePath    string        `toml:"archive"`
+	AdminEmail     string        `toml:"admin"`
+	ReplyAnyone    bool          `toml:"reply_anyone"`
+	Model          string        `toml:"model"`
+	Personality    string        `toml:"personality"`
+	OllamaURL      string        `toml:"ollama_url"`
+	Interval       time.Duration `toml:"interval"`
+	OfflineIMAP    string        `toml:"offlineimap"`
+	MSMTP          string        `toml:"msmtp"`
+	MSMTPAccount   string        `toml:"msmtp_account"`
+	From           string        `toml:"from"`
+	Subject        string        `toml:"subject"`
+	MaxMessageSize int64         `toml:"max_message_bytes"`
+	MaxBodySize    int64         `toml:"max_body_bytes"`
+	PageTimeout    time.Duration `toml:"page_timeout"`
+	MaxPageSize    int64         `toml:"max_page_bytes"`
+	MaxWebContext  int64         `toml:"max_web_context_bytes"`
 }
 
 type ollamaRequest struct {
@@ -98,7 +98,14 @@ var (
 )
 
 func main() {
-	cfg := parseFlags()
+	cfg, err := loadConfig(os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
+	if err != nil {
+		status(cRed, "CONFIG", "%v", err)
+		os.Exit(2)
+	}
 	if err := validateConfig(&cfg); err != nil {
 		status(cRed, "CONFIG", "%v", err)
 		os.Exit(2)
@@ -139,36 +146,6 @@ func main() {
 	}
 
 	status(cYellow, "STOP", "mailbot stopped")
-}
-
-func parseFlags() config {
-	var cfg config
-	flag.StringVar(&cfg.MaildirRoot, "maildir", envOr("MAILBOT_MAILDIR", ""), "Maildir root")
-	flag.StringVar(&cfg.ArchivePath, "archive", envOr("MAILBOT_ARCHIVE", "Archive"), "Archive Maildir path, relative to -maildir unless absolute")
-	flag.StringVar(&cfg.AdminEmail, "admin", envOr("MAILBOT_ADMIN", ""), "only accepted sender address unless -reply-anyone is enabled")
-	flag.BoolVar(&cfg.ReplyAnyone, "reply-anyone", false, "reply to any sender instead of only the configured admin")
-	flag.StringVar(&cfg.Model, "model", envOr("OLLAMA_MODEL", "llama3.2"), "Ollama model")
-	flag.StringVar(&cfg.Personality, "personality", "", "system/personality prompt sent to Ollama")
-	flag.StringVar(&cfg.OllamaURL, "ollama-url", envOr("OLLAMA_URL", "http://127.0.0.1:11434"), "Ollama base URL")
-	flag.DurationVar(&cfg.Interval, "interval", envDuration("MAILBOT_INTERVAL", time.Minute), "scan interval; 0 means run once")
-	flag.StringVar(&cfg.OfflineIMAP, "offlineimap", envOr("OFFLINEIMAP_BIN", "offlineimap"), "offlineimap executable")
-	flag.StringVar(&cfg.MSMTP, "msmtp", envOr("MSMTP_BIN", "msmtp"), "msmtp executable")
-	flag.StringVar(&cfg.MSMTPAccount, "msmtp-account", envOr("MSMTP_ACCOUNT", ""), "optional msmtp account name")
-	flag.StringVar(&cfg.From, "from", envOr("MAILBOT_FROM", ""), "optional From header; msmtp config may add it instead")
-	flag.StringVar(&cfg.Subject, "subject", envOr("MAILBOT_SUBJECT", "Ollama response"), "static subject for replies")
-	flag.Int64Var(&cfg.MaxMessageSize, "max-message-bytes", envInt64("MAILBOT_MAX_MESSAGE_BYTES", 10<<20), "maximum incoming message file size")
-	flag.Int64Var(&cfg.MaxBodySize, "max-body-bytes", envInt64("MAILBOT_MAX_BODY_BYTES", 2<<20), "maximum decoded prompt body size")
-	flag.DurationVar(&cfg.PageTimeout, "page-timeout", envDuration("MAILBOT_PAGE_TIMEOUT", 30*time.Second), "timeout for fetching each URL")
-	flag.Int64Var(&cfg.MaxPageSize, "max-page-bytes", envInt64("MAILBOT_MAX_PAGE_BYTES", 10<<20), "maximum downloaded HTML page size")
-	flag.Int64Var(&cfg.MaxWebContext, "max-web-context-bytes", envInt64("MAILBOT_MAX_WEB_CONTEXT_BYTES", 128<<10), "maximum Org-mode webpage text included in the Ollama prompt")
-	flag.StringVar(&cfg.SyncCommand, "sync-command", envOr("MAILBOT_SYNC_COMMAND", ""), "mail receive executable; overrides -offlineimap")
-	flag.Var(&cfg.SyncArgs, "sync-arg", "argument for -sync-command (repeat for each argument)")
-	flag.StringVar(&cfg.SendCommand, "send-command", envOr("MAILBOT_SEND_COMMAND", ""), "mail send executable; reads complete message on stdin; overrides -msmtp")
-	flag.Var(&cfg.SendArgs, "send-arg", "argument for -send-command (repeat); {recipient} expands to reply address")
-	flag.BoolVar(&cfg.NoSync, "no-sync", false, "scan Maildir without running a receive command")
-	flag.DurationVar(&cfg.CommandTimeout, "command-timeout", 10*time.Minute, "timeout for each mail receive/send command")
-	flag.Parse()
-	return cfg
 }
 
 func validateConfig(cfg *config) error {
