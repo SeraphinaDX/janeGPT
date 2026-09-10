@@ -15,33 +15,37 @@ import (
 
 func defaultConfig() config {
 	return config{
-		MaildirRoot:        envOr("MAILBOT_MAILDIR", ""),
-		ArchivePath:        envOr("MAILBOT_ARCHIVE", "Archive"),
-		FailedPath:         envOr("MAILBOT_FAILED", "Failed"),
-		StateDir:           envOr("MAILBOT_STATE_DIR", "~/.local/state/janeGPT"),
-		MaxAttempts:        int(envInt64("MAILBOT_MAX_ATTEMPTS", 5)),
-		RetryBackoff:       envDuration("MAILBOT_RETRY_BACKOFF", 5*time.Minute),
-		CompletedRetention: envDuration("MAILBOT_COMPLETED_RETENTION", 90*24*time.Hour),
-		AdminEmail:         envOr("MAILBOT_ADMIN", ""),
-		ReplyAnyone:        false,
-		Model:              envOr("OLLAMA_MODEL", "llama3.2"),
-		Personality:        "",
-		OllamaURL:          envOr("OLLAMA_URL", "http://127.0.0.1:11434"),
-		Interval:           envDuration("MAILBOT_INTERVAL", time.Minute),
-		From:               envOr("MAILBOT_FROM", ""),
-		Subject:            envOr("MAILBOT_SUBJECT", ""),
-		MaxMessageSize:     envInt64("MAILBOT_MAX_MESSAGE_BYTES", 10<<20),
-		MaxBodySize:        envInt64("MAILBOT_MAX_BODY_BYTES", 2<<20),
-		PageTimeout:        envDuration("MAILBOT_PAGE_TIMEOUT", 30*time.Second),
-		MaxPageSize:        envInt64("MAILBOT_MAX_PAGE_BYTES", 10<<20),
-		MaxWebContext:      envInt64("MAILBOT_MAX_WEB_CONTEXT_BYTES", 128<<10),
-		CommandTimeout:     10 * time.Minute,
+		MaxAttachmentSize:    envInt64("MAILBOT_MAX_ATTACHMENT_BYTES", 128<<10),
+		MaxAttachmentContext: envInt64("MAILBOT_MAX_ATTACHMENT_CONTEXT_BYTES", 256<<10),
+		MaildirRoot:          envOr("MAILBOT_MAILDIR", ""),
+		ArchivePath:          envOr("MAILBOT_ARCHIVE", "Archive"),
+		FailedPath:           envOr("MAILBOT_FAILED", "Failed"),
+		StateDir:             envOr("MAILBOT_STATE_DIR", "~/.local/state/janeGPT"),
+		MaxAttempts:          int(envInt64("MAILBOT_MAX_ATTEMPTS", 5)),
+		RetryBackoff:         envDuration("MAILBOT_RETRY_BACKOFF", 5*time.Minute),
+		CompletedRetention:   envDuration("MAILBOT_COMPLETED_RETENTION", 90*24*time.Hour),
+		AdminEmail:           envOr("MAILBOT_ADMIN", ""),
+		ReplyAnyone:          false,
+		Model:                envOr("OLLAMA_MODEL", "llama3.2"),
+		Personality:          "",
+		OllamaURL:            envOr("OLLAMA_URL", "http://127.0.0.1:11434"),
+		Interval:             envDuration("MAILBOT_INTERVAL", time.Minute),
+		From:                 envOr("MAILBOT_FROM", ""),
+		Subject:              envOr("MAILBOT_SUBJECT", ""),
+		MaxMessageSize:       envInt64("MAILBOT_MAX_MESSAGE_BYTES", 10<<20),
+		MaxBodySize:          envInt64("MAILBOT_MAX_BODY_BYTES", 2<<20),
+		PageTimeout:          envDuration("MAILBOT_PAGE_TIMEOUT", 30*time.Second),
+		MaxPageSize:          envInt64("MAILBOT_MAX_PAGE_BYTES", 10<<20),
+		MaxWebContext:        envInt64("MAILBOT_MAX_WEB_CONTEXT_BYTES", 128<<10),
+		CommandTimeout:       10 * time.Minute,
 	}
 }
 
 func configFlags(cfg *config, configPath *string, output io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet("janeGPT", flag.ContinueOnError)
 	fs.SetOutput(output)
+	fs.Int64Var(&cfg.MaxAttachmentSize, "max-attachment-bytes", cfg.MaxAttachmentSize, "maximum decoded text attachment size")
+	fs.Int64Var(&cfg.MaxAttachmentContext, "max-attachment-context-bytes", cfg.MaxAttachmentContext, "maximum combined attachment text sent to Ollama")
 	fs.StringVar(configPath, "config", *configPath, "TOML configuration file (default: janegpt.toml if present)")
 	fs.StringVar(&cfg.MaildirRoot, "maildir", cfg.MaildirRoot, "Maildir root")
 	fs.StringVar(&cfg.ArchivePath, "archive", cfg.ArchivePath, "Archive Maildir path, relative to -maildir unless absolute")

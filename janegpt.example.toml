@@ -38,6 +38,8 @@ completed_retention = "2160h" # Keep delivered-message IDs for 90 days.
 # Limits (bytes) and webpage fetch timeout.
 max_message_bytes = 10485760
 max_body_bytes = 2097152
+max_attachment_bytes = 131072 # Per decoded text file; oversized files are skipped.
+max_attachment_context_bytes = 262144 # Combined UTF-8 text from incoming files.
 max_page_bytes = 10485760
 max_web_context_bytes = 131072
 page_timeout = "30s"

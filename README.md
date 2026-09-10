@@ -25,8 +25,15 @@ headers and attachments.
 - Prefers plain text when a multipart message contains both plain-text and HTML
   versions. HTML-only messages are converted to readable plain text.
 - Decodes base64 and quoted-printable bodies, UTF-8 text, and ISO-8859-1 text.
-- Ignores MIME file attachments and embedded `message/rfc822` parts when building
-  the model prompt.
+- Reads incoming `.txt`, `.md`, and `.org` attachments as reference material,
+  labeled by filename. Supports base64, quoted-printable, UTF-8, and Latin-1.
+- Applies per-file and combined UTF-8 text limits; files that exceed either limit
+  are skipped whole. Unsupported, empty, or unreadable files appear in terminal
+  status and a deterministic attachment report in the reply.
+- Treats attachment text and filenames as untrusted reference data in the system
+  prompt. URLs inside attachments are not fetched.
+- Summarizes readable attachments when an email has no body. Incoming files are
+  not reattached to the reply. Embedded `message/rfc822` parts remain ignored.
 - Removes standard signature delimiters and common GrapheneOS, iPhone, iPad,
   Android, and Outlook mobile signatures.
 - Rejects malformed messages, invalid sender addresses, excessive MIME nesting,
@@ -122,8 +129,20 @@ headers and attachments.
 - Provides separate limits for incoming message size, decoded body size, fetched
   page size, and total webpage context sent to Ollama.
 
-Current scope: janeGPT does not give Ollama the sender's file attachments, retain
-conversation history between emails, or fetch non-HTML URL content.
+Current scope: janeGPT does not read PDF, office, image, or archive attachments,
+retain conversation history between emails, or fetch non-HTML URL content.
+
+Incoming attachment limits default to 128 KiB per file and 256 KiB combined:
+
+```toml
+max_attachment_bytes = 131072
+max_attachment_context_bytes = 262144
+```
+
+These limits count decoded UTF-8 document text; filenames and JSON framing add
+some prompt overhead. The existing incoming message size limit still applies.
+Environment defaults are `MAILBOT_MAX_ATTACHMENT_BYTES` and
+`MAILBOT_MAX_ATTACHMENT_CONTEXT_BYTES`.
 
 ## Configuration
 
@@ -237,6 +256,10 @@ Usage of janeGPT:
         Maildir root
   -max-attempts int
         maximum processing attempts before quarantine (default 5)
+  -max-attachment-bytes int
+        maximum decoded text attachment size (default 131072)
+  -max-attachment-context-bytes int
+        maximum combined attachment text sent to Ollama (default 262144)
   -max-body-bytes int
         maximum decoded prompt body size (default 2097152)
   -max-message-bytes int
