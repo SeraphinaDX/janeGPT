@@ -19,8 +19,8 @@ headers and attachments.
 ### Email processing
 
 - Scans both `new` and `cur` in every valid Maildir below the configured root.
-- Excludes the configured Archive Maildir and creates its `cur`, `new`, and
-  `tmp` directories when necessary.
+- Excludes the configured Archive and Failed Maildirs and creates their `cur`,
+  `new`, and `tmp` directories when necessary.
 - Accepts plain-text and HTML message bodies, including nested multipart email.
 - Prefers plain text when a multipart message contains both plain-text and HTML
   versions. HTML-only messages are converted to readable plain text.
@@ -91,8 +91,17 @@ headers and attachments.
 - Polls at a configurable interval or runs one scan with `interval = "0s"`.
 - Processes discovered messages in sorted path order and continues to other
   messages when one fails.
-- Archives a processed message only after its reply command succeeds, allowing
-  model and delivery failures to be retried on a later scan.
+- Identifies a message by its valid `Message-ID`, or by a SHA-256 content hash
+  when no usable ID is present.
+- Stores retry and delivery records in an atomically replaced, private JSON
+  ledger below the configured state directory.
+- Records successful delivery before archiving. If janeGPT restarts after the
+  send succeeds but before archival, it archives the message without resending.
+- Retries model, webpage, parsing, and mail-command failures with exponential
+  backoff, capped at 24 hours, while showing the attempt count and next retry.
+- Moves a message to the configured Failed Maildir after the maximum attempt
+  count and retains the last error as its quarantine reason.
+- Prunes delivered-message records after a configurable retention period.
 - Avoids overwriting an existing archived message with the same filename.
 - Can archive across filesystems by copying and then removing the source when a
   direct rename is unavailable.
@@ -133,10 +142,16 @@ A minimal configuration using MailSalonSync and msmtp is:
 
 ```toml
 maildir = "~/Maildir"
+archive = "Archive"
+failed = "Failed"
+state_dir = "~/.local/state/janeGPT"
 admin = "you@example.org"
 from = "bot@example.org"
 model = "llama3.2"
 interval = "1m"
+max_attempts = 5
+retry_backoff = "5m"
+completed_retention = "2160h"
 
 sync_command = ["MailSalonSync", "-plain", "sync"]
 send_command = ["msmtp", "--", "{recipient}"]
@@ -175,7 +190,7 @@ send_command = ["/usr/sbin/sendmail", "-t", "-i"]
 See `janegpt.example.toml` for every setting. Durations use strings such as
 `"30s"`, `"1m"`, and `"0s"`. Unknown keys, invalid values, and missing explicitly
 selected files stop startup with an error. `~` expands in the config filename,
-Maildir and archive paths, and executable paths.
+Maildir, archive, failed, state-directory, and executable paths.
 
 Settings are applied in this order: built-in defaults, environment variables,
 TOML, then explicit command-line overrides. Switches remain useful for temporary
@@ -185,9 +200,14 @@ replaces that entire TOML command, one executable or argument per occurrence.
 Mail commands inherit janeGPT's environment. Keep credentials in the mail
 programs' own configuration or environment. Both commands must run in the
 foreground and return a nonzero status on failure. A receive failure stops the
-scan. A send failure leaves the incoming message unarchived for retry. Each
-command has a ten-minute timeout by default, configurable with
-`command_timeout = "20m"`.
+scan. A send failure leaves the incoming message in place and schedules a retry.
+After `max_attempts`, janeGPT moves it into the Failed Maildir. Each command has
+a ten-minute timeout by default, configurable with `command_timeout = "20m"`.
+
+Run only one janeGPT process against a state directory at a time. The delivery
+ledger prevents resending after a confirmed successful send, but no mail client
+can guarantee exactly-once delivery when a send program accepts a message and
+then incorrectly exits with an error.
 
 ## Command-line options
 
@@ -203,14 +223,20 @@ Usage of janeGPT:
         Archive Maildir path, relative to -maildir unless absolute (default "Archive")
   -command-timeout duration
         timeout for each mail receive/send command (default 10m0s)
+  -completed-retention duration
+        how long to retain delivered-message records (default 2160h0m0s)
   -config string
         TOML configuration file (default: janegpt.toml if present)
+  -failed string
+        Failed Maildir path, relative to -maildir unless absolute (default "Failed")
   -from string
         optional From header
   -interval duration
         scan interval; 0 means run once (default 1m0s)
   -maildir string
         Maildir root
+  -max-attempts int
+        maximum processing attempts before quarantine (default 5)
   -max-body-bytes int
         maximum decoded prompt body size (default 2097152)
   -max-message-bytes int
@@ -229,8 +255,12 @@ Usage of janeGPT:
         system/personality prompt sent to Ollama
   -reply-anyone
         reply to any sender instead of only the configured admin
+  -retry-backoff duration
+        initial retry delay; doubles after each failure (default 5m0s)
   -send-command value
         send command element (repeat); reads message on stdin; {recipient} expands in arguments
+  -state-dir string
+        directory for the durable delivery ledger (default "~/.local/state/janeGPT")
   -subject string
         reply subject override; empty replies to the incoming subject
   -sync-command value
