@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/mail"
 	"os"
 	"path/filepath"
@@ -107,8 +108,8 @@ func TestNoSync(t *testing.T) {
 
 func TestSendCommandRecipient(t *testing.T) {
 	cfg := config{SendCommand: commandArgs{"sender", "send", "{recipient}"}}
-	program, args := sendCommand(cfg, "b@example.org")
-	if program != "sender" || !reflect.DeepEqual(args, []string{"send", "b@example.org"}) {
+	program, args := sendCommand(cfg, []string{"b@example.org", "c@example.org"})
+	if program != "sender" || !reflect.DeepEqual(args, []string{"send", "b@example.org", "c@example.org"}) {
 		t.Fatalf("%s %q", program, args)
 	}
 	if cfg.SendCommand[2] != "{recipient}" {
@@ -118,8 +119,9 @@ func TestSendCommandRecipient(t *testing.T) {
 
 func TestCustomSenderReceivesMIME(t *testing.T) {
 	cfg, capture := helperConfig(t, "send")
-	cfg.From, cfg.Subject = "bot@example.org", "Reply"
-	if err := sendMail(context.Background(), cfg, "a@example.org", "Model answer", nil); err != nil {
+	cfg.From = "bot@example.org"
+	reply := replyHeaders{Subject: "Re: Café", InReplyTo: "<parent@example.org>", References: "<root@example.org> <parent@example.org>"}
+	if err := sendMail(context.Background(), cfg, []string{"a@example.org", "b@example.org"}, reply, "Model answer", nil); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(capture)
@@ -131,7 +133,11 @@ func TestCustomSenderReceivesMIME(t *testing.T) {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(msg.Body)
-	if msg.Header.Get("To") != "a@example.org" || msg.Header.Get("From") != cfg.From || strings.TrimSpace(string(body)) != "Model answer" {
+	subject, err := new(mime.WordDecoder).DecodeHeader(msg.Header.Get("Subject"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Header.Get("To") != "a@example.org, b@example.org" || msg.Header.Get("From") != cfg.From || subject != reply.Subject || msg.Header.Get("In-Reply-To") != reply.InReplyTo || msg.Header.Get("References") != reply.References || strings.TrimSpace(string(body)) != "Model answer" {
 		t.Fatalf("unexpected message: %s", data)
 	}
 }

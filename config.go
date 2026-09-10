@@ -24,7 +24,7 @@ func defaultConfig() config {
 		OllamaURL:      envOr("OLLAMA_URL", "http://127.0.0.1:11434"),
 		Interval:       envDuration("MAILBOT_INTERVAL", time.Minute),
 		From:           envOr("MAILBOT_FROM", ""),
-		Subject:        envOr("MAILBOT_SUBJECT", "Ollama response"),
+		Subject:        envOr("MAILBOT_SUBJECT", ""),
 		MaxMessageSize: envInt64("MAILBOT_MAX_MESSAGE_BYTES", 10<<20),
 		MaxBodySize:    envInt64("MAILBOT_MAX_BODY_BYTES", 2<<20),
 		PageTimeout:    envDuration("MAILBOT_PAGE_TIMEOUT", 30*time.Second),
@@ -47,7 +47,7 @@ func configFlags(cfg *config, configPath *string, output io.Writer) *flag.FlagSe
 	fs.StringVar(&cfg.OllamaURL, "ollama-url", cfg.OllamaURL, "Ollama base URL")
 	fs.DurationVar(&cfg.Interval, "interval", cfg.Interval, "scan interval; 0 means run once")
 	fs.StringVar(&cfg.From, "from", cfg.From, "optional From header")
-	fs.StringVar(&cfg.Subject, "subject", cfg.Subject, "static subject for replies")
+	fs.StringVar(&cfg.Subject, "subject", cfg.Subject, "reply subject override; empty replies to the incoming subject")
 	fs.Int64Var(&cfg.MaxMessageSize, "max-message-bytes", cfg.MaxMessageSize, "maximum incoming message file size")
 	fs.Int64Var(&cfg.MaxBodySize, "max-body-bytes", cfg.MaxBodySize, "maximum decoded prompt body size")
 	fs.DurationVar(&cfg.PageTimeout, "page-timeout", cfg.PageTimeout, "timeout for fetching each URL")

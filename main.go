@@ -281,10 +281,16 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 		return nil
 	}
 
-	recipient := cfg.AdminEmail
+	fallbackRecipient := cfg.AdminEmail
 	if cfg.ReplyAnyone {
-		recipient = from.Address
+		fallbackRecipient = from.Address
 	}
+	recipients, err := replyRecipients(msg.Header, fallbackRecipient)
+	if err != nil {
+		f.Close()
+		return err
+	}
+	reply := buildReplyHeaders(msg.Header, cfg.Subject)
 
 	body, err := extractBody(textproto.MIMEHeader(msg.Header), msg.Body, cfg.MaxBodySize)
 	f.Close()
@@ -327,9 +333,9 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 
 	// Important: only the model response is placed in the outgoing message body.
 	// The incoming prompt/body is never appended or quoted here.
-	program, _ := sendCommand(cfg, recipient)
-	status(cBlue, "SEND", "sending model response to %s using %s", recipient, program)
-	if err := sendMail(ctx, cfg, recipient, response, attachments); err != nil {
+	program, _ := sendCommand(cfg, recipients)
+	status(cBlue, "SEND", "sending model response to %s using %s", strings.Join(recipients, ", "), program)
+	if err := sendMail(ctx, cfg, recipients, reply, response, attachments); err != nil {
 		return fmt.Errorf("mail send command failed: %w", err)
 	}
 	status(cGreen, "SEND", "response sent")
@@ -377,14 +383,20 @@ func askOllama(ctx context.Context, client *http.Client, cfg config, prompt stri
 	return out.Response, nil
 }
 
-func sendMail(ctx context.Context, cfg config, recipient, modelResponse string, attachments []attachment) error {
+func sendMail(ctx context.Context, cfg config, recipients []string, reply replyHeaders, modelResponse string, attachments []attachment) error {
 	var msg bytes.Buffer
-	msg.WriteString("To: " + recipient + "\r\n")
+	msg.WriteString("To: " + strings.Join(recipients, ", ") + "\r\n")
 	if cfg.From != "" {
 		msg.WriteString("From: " + cfg.From + "\r\n")
 	}
 	msg.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
-	msg.WriteString("Subject: " + cfg.Subject + "\r\n")
+	msg.WriteString("Subject: " + mime.QEncoding.Encode("utf-8", reply.Subject) + "\r\n")
+	if reply.InReplyTo != "" {
+		msg.WriteString("In-Reply-To: " + reply.InReplyTo + "\r\n")
+	}
+	if reply.References != "" {
+		msg.WriteString("References: " + reply.References + "\r\n")
+	}
 	msg.WriteString("MIME-Version: 1.0\r\n")
 
 	if len(attachments) == 0 {
@@ -425,7 +437,7 @@ func sendMail(ctx context.Context, cfg config, recipient, modelResponse string, 
 		}
 	}
 
-	program, args := sendCommand(cfg, recipient)
+	program, args := sendCommand(cfg, recipients)
 	return runMailCommand(ctx, cfg.CommandTimeout, program, msg.Bytes(), args...)
 }
 

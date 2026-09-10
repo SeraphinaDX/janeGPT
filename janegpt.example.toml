@@ -5,7 +5,7 @@ archive = "Archive" # Relative to maildir unless absolute.
 admin = "you@example.org"
 reply_anyone = false
 from = "bot@example.org"
-subject = "Ollama response"
+subject = "" # Empty uses "Re: " followed by the incoming subject.
 interval = "1m" # Use "0s" for a single scan.
 
 # Ollama
