@@ -35,8 +35,10 @@ headers and attachments.
 ### Sender control and loop prevention
 
 - In the default admin-only mode, prompts Ollama only for mail from the configured
-  administrator and replies to that address.
+  administrator. Replies use `Reply-To` when present, otherwise the admin address.
 - `reply_anyone = true` replies directly to each message's sender.
+- Honors a valid `Reply-To` header, including multiple reply addresses. The
+  configured admin or original sender is used when `Reply-To` is absent.
 - When reply-to-anyone mode is enabled and `from` is configured, messages from
   the bot's own address are archived without a reply to prevent a mail loop.
 - Unauthorized, self-sent, and empty messages are archived without contacting
@@ -50,7 +52,11 @@ headers and attachments.
 - Supports a configurable system/personality prompt.
 - Sends only the model's answer in the reply body; it does not quote the incoming
   email.
-- Supports a configurable reply subject and optional `From` header.
+- Replies with `Re: ` followed by the decoded incoming subject and avoids adding
+  a second reply prefix. A configured `subject` overrides this behavior.
+- Adds `In-Reply-To` and extends `References` from valid incoming message IDs so
+  supporting mail clients keep the exchange in one thread.
+- Supports an optional `From` header.
 
 ### Webpage context
 
@@ -108,8 +114,7 @@ headers and attachments.
   page size, and total webpage context sent to Ollama.
 
 Current scope: janeGPT does not give Ollama the sender's file attachments, retain
-conversation history between emails, preserve the incoming subject or threading
-headers, or fetch non-HTML URL content.
+conversation history between emails, or fetch non-HTML URL content.
 
 ## Configuration
 
@@ -227,7 +232,7 @@ Usage of janeGPT:
   -send-command value
         send command element (repeat); reads message on stdin; {recipient} expands in arguments
   -subject string
-        static subject for replies (default "Ollama response")
+        reply subject override; empty replies to the incoming subject
   -sync-command value
         receive command element (repeat for executable and each argument)
 ```

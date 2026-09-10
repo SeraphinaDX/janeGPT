@@ -44,13 +44,15 @@ func receiveMail(ctx context.Context, cfg config) error {
 	return nil
 }
 
-func sendCommand(cfg config, recipient string) (string, []string) {
-	args := append([]string(nil), cfg.SendCommand[1:]...)
-	for i, arg := range args {
+func sendCommand(cfg config, recipients []string) (string, []string) {
+	args := make([]string, 0, len(cfg.SendCommand)-1+len(recipients))
+	for _, arg := range cfg.SendCommand[1:] {
 		// Only a whole argument is a placeholder; no shell expansion.
 		if arg == "{recipient}" {
-			args[i] = recipient
+			args = append(args, recipients...)
+			continue
 		}
+		args = append(args, arg)
 	}
 	return cfg.SendCommand[0], args
 }
