@@ -79,7 +79,7 @@ func buildReplyHeaders(header mail.Header, subjectOverride string) replyHeaders 
 }
 
 func replySubject(incoming, override string) string {
-	if strings.TrimSpace(override) != "" {
+	if strings.TrimSpace(incoming) == "" && strings.TrimSpace(override) != "" {
 		return cleanHeaderText(override)
 	}
 	subject, err := new(mime.WordDecoder).DecodeHeader(incoming)

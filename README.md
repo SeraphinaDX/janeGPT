@@ -60,7 +60,8 @@ headers and attachments.
 - Sends only the model's answer in the reply body; it does not quote the incoming
   email.
 - Replies with `Re: ` followed by the decoded incoming subject and avoids adding
-  a second reply prefix. A configured `subject` overrides this behavior.
+  a second reply prefix. Incoming subjects always take precedence; configured
+  `subject` is only a fallback for mail without a subject.
 - Adds `In-Reply-To` and extends `References` from valid incoming message IDs so
   supporting mail clients keep the exchange in one thread.
 - Supports an optional `From` header.
@@ -145,6 +146,93 @@ Environment defaults are `MAILBOT_MAX_ATTACHMENT_BYTES` and
 `MAILBOT_MAX_ATTACHMENT_CONTEXT_BYTES`.
 
 ## Configuration
+
+### Zeal docsets and external tools
+
+Enable the documentation tool by pointing to the **Docset storage directory**
+shown in Zeal's preferences. Install the desired docsets in Zeal first and install
+Pandoc on the machine running Jane. Jane reads installed docsets; it does not
+download arbitrary docsets requested by email.
+
+```toml
+docsets_dir = "~/.local/share/Zeal/Zeal/docsets"
+max_tool_context_bytes = 131072
+```
+
+Email Jane with a subject such as `Python: explain pathlib with examples` and
+a body such as `Use the Python docset. Explain pathlib and give practical examples.
+Include the full docset in Markdown and Org.` Subject-only requests also work.
+
+Ollama first selects a tool and its inputs using JSON output on its generate API.
+Jane permits only configured tool names and declared string inputs, executes
+fixed argument arrays without a shell, and supplies tool results to a second
+Ollama request for the final explanation and examples. Tool selection sees only
+the email subject and body, not attached documents or fetched webpages.
+Normal conversations select no tools. At most three calls run per email;
+tools cannot trigger additional tool calls from their output.
+
+The built-in `zeal_docs` tool launches this executable as a separate helper:
+
+```sh
+./janeGPT docset -root=/path/to/docsets -list
+printf '%s' '{"docset":"Python","query":"pathlib examples"}' | ./janeGPT docset -root=/path/to/docsets
+```
+
+The helper reads **every HTML/HTM/XHTML page** under the selected docset's
+`Contents/Resources/Documents` directory and uses Pandoc to produce two
+complete text exports: `Python.md` and `Python.org`. Both are attached to the
+reply, including pages unrelated to the question. Headings identify source
+pages; code blocks, tables, and prose are converted by Pandoc. These are text
+exports, not copies of image assets, JavaScript, or the search database. Relative
+links retain their original targets and may need the original docset to resolve.
+Dynamic content requiring JavaScript is not rendered.
+
+Query-matching pages are ranked for the model context, which is bounded separately
+from the complete attachments. Jane does not claim that Ollama read every page.
+The helper refuses symlinks and fails on unreadable/non-UTF-8 pages, conversion
+errors, or size overflow instead of sending a partial export.
+
+The default helper limits are 48 MiB of source HTML (including page labels),
+48 MiB per export, and nine minutes total. The built-in tool has a ten-minute
+timeout and a 128 MiB JSON-output limit. Large docsets may exceed these limits or
+your mail server's message limit; MIME base64 adds roughly a third to attachment
+size. Failures follow the configured retry/quarantine policy. To customize helper
+limits, leave `docsets_dir` empty and register a tool explicitly:
+
+```toml
+[[tools]]
+name = "zeal_docs"
+description = "Read installed Python documentation; docset must be Python. query is the requested topic."
+command = ["/home/you/bin/janeGPT", "docset", "-root=/path/to/docsets", "-max-bytes=67108864", "-context-bytes=131072", "-timeout=15m"]
+inputs = ["docset", "query"]
+timeout = "16m"
+max_output_bytes = 201326592
+```
+
+Any external program can implement this protocol: receive a JSON object of
+declared string inputs on stdin; write one JSON result on stdout; write diagnostics
+to stderr; exit nonzero on failure. For example:
+
+```json
+{"context":"Reference text for the model","attachments":[{"name":"reference.md","content_type":"text/markdown","text":"# Full reference"}]}
+```
+
+`attachments` is optional. Only UTF-8 `.md` and `.org` output attachments are
+accepted, with plain filenames; Jane assigns their MIME types from the extension.
+Commands and executable paths come only from TOML; model inputs are never shell
+commands. Only configure tools you intend email requests to invoke. Tools run
+with Jane's account permissions and can run again on retry, so read-only or
+idempotent commands are appropriate.
+
+Tool defaults: `timeout = "2m"`, `max_output_bytes = 33554432`.
+Tool results are explicitly marked as untrusted reference material. Existing
+sync/send configuration and Reply-To/threading headers continue to work.
+
+Format references: [Zeal usage](https://zealdocs.org/usage.html),
+[Dash docset structure](https://kapeli.com/docsets), and
+[Pandoc's manual](https://pandoc.org/MANUAL.html).
+
+### Mail configuration
 
 Copy the example, edit your addresses and commands, then start janeGPT:
 
@@ -246,6 +334,8 @@ Usage of janeGPT:
         how long to retain delivered-message records (default 2160h0m0s)
   -config string
         TOML configuration file (default: janegpt.toml if present)
+  -docsets-dir string
+        Zeal docset storage directory; empty disables built-in documentation tool
   -failed string
         Failed Maildir path, relative to -maildir unless absolute (default "Failed")
   -from string
@@ -268,6 +358,8 @@ Usage of janeGPT:
         maximum downloaded HTML page size (default 10485760)
   -max-web-context-bytes int
         maximum Org-mode webpage text included in the Ollama prompt (default 131072)
+  -max-tool-context-bytes int
+        maximum combined tool reference text sent to Ollama (default 131072)
   -model string
         Ollama model (default "llama3.2")
   -ollama-url string
@@ -285,7 +377,7 @@ Usage of janeGPT:
   -state-dir string
         directory for the durable delivery ledger (default "~/.local/state/janeGPT")
   -subject string
-        reply subject override; empty replies to the incoming subject
+        fallback subject for mail with no subject; incoming subjects always take precedence
   -sync-command value
         receive command element (repeat for executable and each argument)
 ```

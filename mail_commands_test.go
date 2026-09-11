@@ -29,6 +29,14 @@ func TestMailCommandHelper(t *testing.T) {
 	}
 	args = args[1:]
 	switch args[0] {
+	case "docset":
+		if err := docsetCommand([]string{"-root", args[1]}, os.Stdin, os.Stdout); err != nil {
+			os.Exit(9)
+		}
+	case "tool":
+		io.WriteString(os.Stdout, `{"context":"Useful tool result","attachments":[{"name":"reference.md","text":"# Reference"}]}`)
+	case "overflow":
+		io.WriteString(os.Stdout, strings.Repeat("x", 100000))
 	case "fail":
 		os.Exit(7)
 	case "wait":

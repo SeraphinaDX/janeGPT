@@ -50,8 +50,11 @@ func TestBuildReplyHeaders(t *testing.T) {
 		t.Fatalf("duplicated reply prefix: %q", got.Subject)
 	}
 	got = buildReplyHeaders(mail.Header{"Subject": {"Ignored"}}, "Custom\r\nInjected")
-	if got.Subject != "Custom Injected" {
-		t.Fatalf("override: %q", got.Subject)
+	if got.Subject != "Re: Ignored" {
+		t.Fatalf("incoming subject must win: %q", got.Subject)
+	}
+	if got := replySubject("", "Custom\r\nInjected"); got != "Custom Injected" {
+		t.Fatalf("fallback subject: %q", got)
 	}
 }
 
