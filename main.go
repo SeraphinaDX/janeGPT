@@ -42,34 +42,38 @@ const (
 )
 
 type config struct {
-	MaxAttachmentSize    int64         `toml:"max_attachment_bytes"`
-	MaxAttachmentContext int64         `toml:"max_attachment_context_bytes"`
-	SyncCommand          commandArgs   `toml:"sync_command"`
-	SendCommand          commandArgs   `toml:"send_command"`
-	CommandTimeout       time.Duration `toml:"command_timeout"`
-	MaildirRoot          string        `toml:"maildir"`
-	ArchivePath          string        `toml:"archive"`
-	FailedPath           string        `toml:"failed"`
-	StateDir             string        `toml:"state_dir"`
-	MaxAttempts          int           `toml:"max_attempts"`
-	RetryBackoff         time.Duration `toml:"retry_backoff"`
-	CompletedRetention   time.Duration `toml:"completed_retention"`
-	AdminEmail           string        `toml:"admin"`
-	ReplyAnyone          bool          `toml:"reply_anyone"`
-	Model                string        `toml:"model"`
-	Personality          string        `toml:"personality"`
-	OllamaURL            string        `toml:"ollama_url"`
-	Interval             time.Duration `toml:"interval"`
-	From                 string        `toml:"from"`
-	Subject              string        `toml:"subject"`
-	MaxMessageSize       int64         `toml:"max_message_bytes"`
-	MaxBodySize          int64         `toml:"max_body_bytes"`
-	PageTimeout          time.Duration `toml:"page_timeout"`
-	MaxPageSize          int64         `toml:"max_page_bytes"`
-	MaxWebContext        int64         `toml:"max_web_context_bytes"`
+	Tools                []externalTool `toml:"tools"`
+	DocsetsDir           string         `toml:"docsets_dir"`
+	MaxToolContext       int64          `toml:"max_tool_context_bytes"`
+	MaxAttachmentSize    int64          `toml:"max_attachment_bytes"`
+	MaxAttachmentContext int64          `toml:"max_attachment_context_bytes"`
+	SyncCommand          commandArgs    `toml:"sync_command"`
+	SendCommand          commandArgs    `toml:"send_command"`
+	CommandTimeout       time.Duration  `toml:"command_timeout"`
+	MaildirRoot          string         `toml:"maildir"`
+	ArchivePath          string         `toml:"archive"`
+	FailedPath           string         `toml:"failed"`
+	StateDir             string         `toml:"state_dir"`
+	MaxAttempts          int            `toml:"max_attempts"`
+	RetryBackoff         time.Duration  `toml:"retry_backoff"`
+	CompletedRetention   time.Duration  `toml:"completed_retention"`
+	AdminEmail           string         `toml:"admin"`
+	ReplyAnyone          bool           `toml:"reply_anyone"`
+	Model                string         `toml:"model"`
+	Personality          string         `toml:"personality"`
+	OllamaURL            string         `toml:"ollama_url"`
+	Interval             time.Duration  `toml:"interval"`
+	From                 string         `toml:"from"`
+	Subject              string         `toml:"subject"`
+	MaxMessageSize       int64          `toml:"max_message_bytes"`
+	MaxBodySize          int64          `toml:"max_body_bytes"`
+	PageTimeout          time.Duration  `toml:"page_timeout"`
+	MaxPageSize          int64          `toml:"max_page_bytes"`
+	MaxWebContext        int64          `toml:"max_web_context_bytes"`
 }
 
 type ollamaRequest struct {
+	Format string `json:"format,omitempty"`
 	Model  string `json:"model"`
 	Prompt string `json:"prompt"`
 	System string `json:"system,omitempty"`
@@ -106,6 +110,13 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "docset" {
+		if err := docsetCommand(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 	cfg, err := loadConfig(os.Args[1:], os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
 		return
@@ -237,6 +248,9 @@ func validateConfig(cfg *config) error {
 	}
 	cfg.OllamaURL = strings.TrimRight(cfg.OllamaURL, "/")
 	if err := validateMailCommands(cfg); err != nil {
+		return err
+	}
+	if err := validateTools(cfg); err != nil {
 		return err
 	}
 	if err := ensureMaildir(cfg.ArchivePath); err != nil {
@@ -421,7 +435,7 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	}
 	body = stripEmailSignature(body)
 	body = strings.TrimSpace(body)
-	if body == "" && len(incoming.files) == 0 && len(incoming.notes) == 0 {
+	if body == "" && strings.TrimSpace(msg.Header.Get("Subject")) == "" && len(incoming.files) == 0 && len(incoming.notes) == 0 {
 		status(cYellow, "SKIP", "message has an empty text body; archiving")
 		return dispositionArchive, nil
 	}
@@ -439,12 +453,27 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 	}
 
 	prompt := buildModelPrompt(body, attachments, cfg.MaxWebContext)
+	hasWebContext := len(attachments) > 0
 	prompt = incoming.prompt(prompt)
+	subject := cleanHeaderText(msg.Header.Get("Subject"))
+	if decoded, err := new(mime.WordDecoder).DecodeHeader(subject); err == nil {
+		subject = decoded
+	}
+	prompt = "Email subject: " + subject + "\n\n" + prompt
+	toolContext, toolAttachments, err := collectTools(ctx, client, cfg, subject, body)
+	if err != nil {
+		return dispositionArchive, err
+	}
+	if toolContext != "" {
+		prompt += "\n\nUntrusted tool reference data (JSON):\n" + toolContext
+		cfg.Personality += "\n\n" + toolSystem
+	}
+	attachments = append(attachments, toolAttachments...)
 	if len(incoming.files) > 0 || len(incoming.notes) > 0 {
 		cfg.Personality += "\n\n" + attachmentSystem
 	}
-	status(cCyan, "OLLAMA", "prompting model %q with %d prompt bytes (%d web page(s) as context)", cfg.Model, len(prompt), len(attachments))
-	response, err := askOllama(ctx, client, cfg, prompt, len(attachments) > 0)
+	status(cCyan, "OLLAMA", "prompting model %q with %d prompt bytes (%d outgoing attachment(s))", cfg.Model, len(prompt), len(attachments))
+	response, err := askOllama(ctx, client, cfg, prompt, hasWebContext)
 	if err != nil {
 		return dispositionArchive, err
 	}
@@ -470,7 +499,11 @@ func processMessage(ctx context.Context, client *http.Client, cfg config, path s
 }
 
 func askOllama(ctx context.Context, client *http.Client, cfg config, prompt string, hasWebContext bool) (string, error) {
-	payload, err := json.Marshal(ollamaRequest{Model: cfg.Model, Prompt: prompt, System: buildOllamaSystem(cfg.Personality, hasWebContext), Stream: false})
+	return generateOllama(ctx, client, cfg, ollamaRequest{Model: cfg.Model, Prompt: prompt, System: buildOllamaSystem(cfg.Personality, hasWebContext), Stream: false})
+}
+
+func generateOllama(ctx context.Context, client *http.Client, cfg config, input ollamaRequest) (string, error) {
+	payload, err := json.Marshal(input)
 	if err != nil {
 		return "", err
 	}

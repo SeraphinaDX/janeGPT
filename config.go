@@ -15,6 +15,7 @@ import (
 
 func defaultConfig() config {
 	return config{
+		MaxToolContext:       128 << 10,
 		MaxAttachmentSize:    envInt64("MAILBOT_MAX_ATTACHMENT_BYTES", 128<<10),
 		MaxAttachmentContext: envInt64("MAILBOT_MAX_ATTACHMENT_CONTEXT_BYTES", 256<<10),
 		MaildirRoot:          envOr("MAILBOT_MAILDIR", ""),
@@ -44,6 +45,8 @@ func defaultConfig() config {
 func configFlags(cfg *config, configPath *string, output io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet("janeGPT", flag.ContinueOnError)
 	fs.SetOutput(output)
+	fs.StringVar(&cfg.DocsetsDir, "docsets-dir", cfg.DocsetsDir, "Zeal docset storage directory; empty disables built-in documentation tool")
+	fs.Int64Var(&cfg.MaxToolContext, "max-tool-context-bytes", cfg.MaxToolContext, "maximum combined tool reference text sent to Ollama")
 	fs.Int64Var(&cfg.MaxAttachmentSize, "max-attachment-bytes", cfg.MaxAttachmentSize, "maximum decoded text attachment size")
 	fs.Int64Var(&cfg.MaxAttachmentContext, "max-attachment-context-bytes", cfg.MaxAttachmentContext, "maximum combined attachment text sent to Ollama")
 	fs.StringVar(configPath, "config", *configPath, "TOML configuration file (default: janegpt.toml if present)")
@@ -61,7 +64,7 @@ func configFlags(cfg *config, configPath *string, output io.Writer) *flag.FlagSe
 	fs.StringVar(&cfg.OllamaURL, "ollama-url", cfg.OllamaURL, "Ollama base URL")
 	fs.DurationVar(&cfg.Interval, "interval", cfg.Interval, "scan interval; 0 means run once")
 	fs.StringVar(&cfg.From, "from", cfg.From, "optional From header")
-	fs.StringVar(&cfg.Subject, "subject", cfg.Subject, "reply subject override; empty replies to the incoming subject")
+	fs.StringVar(&cfg.Subject, "subject", cfg.Subject, "fallback subject for mail with no subject; incoming subjects always take precedence")
 	fs.Int64Var(&cfg.MaxMessageSize, "max-message-bytes", cfg.MaxMessageSize, "maximum incoming message file size")
 	fs.Int64Var(&cfg.MaxBodySize, "max-body-bytes", cfg.MaxBodySize, "maximum decoded prompt body size")
 	fs.DurationVar(&cfg.PageTimeout, "page-timeout", cfg.PageTimeout, "timeout for fetching each URL")
@@ -126,7 +129,7 @@ func loadConfig(args []string, output io.Writer) (config, error) {
 			return config{}, err
 		}
 	}
-	for _, path := range []*string{&cfg.MaildirRoot, &cfg.ArchivePath, &cfg.FailedPath, &cfg.StateDir} {
+	for _, path := range []*string{&cfg.MaildirRoot, &cfg.ArchivePath, &cfg.FailedPath, &cfg.StateDir, &cfg.DocsetsDir} {
 		expanded, err := expandHome(*path)
 		if err != nil {
 			return config{}, err
