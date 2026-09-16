@@ -13,6 +13,8 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// defaultConfig seeds built-in values with supported environment overrides.
+// TOML and explicit flags are applied later by loadConfig.
 func defaultConfig() config {
 	return config{
 		MaxToolContext:       128 << 10,
@@ -42,6 +44,8 @@ func defaultConfig() config {
 	}
 }
 
+// configFlags binds flags to the supplied configuration, using its current
+// values as defaults so omitted flags preserve settings loaded from TOML.
 func configFlags(cfg *config, configPath *string, output io.Writer) *flag.FlagSet {
 	fs := flag.NewFlagSet("janeGPT", flag.ContinueOnError)
 	fs.SetOutput(output)
@@ -80,6 +84,8 @@ func configFlags(cfg *config, configPath *string, output io.Writer) *flag.FlagSe
 func loadConfig(args []string, output io.Writer) (config, error) {
 	cfg := defaultConfig()
 	configPath := os.Getenv("MAILBOT_CONFIG")
+	// Parse once to discover the config path and explicitly supplied flags.
+	// If TOML is loaded, start over and replay flags so they retain precedence.
 	fs := configFlags(&cfg, &configPath, output)
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -149,6 +155,8 @@ func loadConfig(args []string, output io.Writer) (config, error) {
 	return cfg, nil
 }
 
+// expandHome supports only the current user’s ~ and ~/ prefix. It does not
+// expand environment variables, other users’ homes, or shell expressions.
 func expandHome(path string) (string, error) {
 	if path != "~" && !strings.HasPrefix(path, "~/") {
 		return path, nil

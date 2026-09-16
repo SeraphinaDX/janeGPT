@@ -22,6 +22,8 @@ const (
 	maxRetryBackoff   = 24 * time.Hour
 )
 
+// messageState records the outcome of processing attempts, independently of
+// the message’s current Maildir filename or location.
 type messageState struct {
 	Status      string    `json:"status"`
 	Attempts    int       `json:"attempts"`
@@ -30,16 +32,22 @@ type messageState struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+// stateData is the versioned on-disk format; incompatible versions stop startup
+// rather than silently discarding duplicate-delivery protection.
 type stateData struct {
 	Version  int                     `json:"version"`
 	Messages map[string]messageState `json:"messages"`
 }
 
+// deliveryLedger owns one state file. It has no interprocess lock: only one
+// bot process may use a state directory at a time.
 type deliveryLedger struct {
 	path string
 	data stateData
 }
 
+// openDeliveryLedger starts empty only when the file is absent. Corrupt or
+// unsupported state is an error because ignoring it could resend delivered mail.
 func openDeliveryLedger(dir string) (*deliveryLedger, error) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create state directory: %w", err)
@@ -95,6 +103,8 @@ func (l *deliveryLedger) get(key string) (messageState, bool) {
 	return record, ok
 }
 
+// put persists a record before reporting success and restores the in-memory
+// value if saving fails, keeping subsequent decisions consistent with disk.
 func (l *deliveryLedger) put(key string, record messageState) error {
 	previous, existed := l.data.Messages[key]
 	l.data.Messages[key] = record
@@ -109,6 +119,8 @@ func (l *deliveryLedger) put(key string, record messageState) error {
 	return nil
 }
 
+// pruneCompleted expires only delivered records. Quarantine and pending retry
+// records remain so old failed messages are not treated as new work.
 func (l *deliveryLedger) pruneCompleted(before time.Time) error {
 	removed := make(map[string]messageState)
 	for key, record := range l.data.Messages {
@@ -129,6 +141,8 @@ func (l *deliveryLedger) pruneCompleted(before time.Time) error {
 	return nil
 }
 
+// save writes and syncs a private temporary file in the same directory before
+// renaming it over the ledger. Readers see a complete old or new JSON document.
 func (l *deliveryLedger) save() error {
 	dir := filepath.Dir(l.path)
 	f, err := os.CreateTemp(dir, ".state-*.tmp")
@@ -157,6 +171,7 @@ func (l *deliveryLedger) save() error {
 	if err := os.Rename(tmp, l.path); err != nil {
 		return fmt.Errorf("replace delivery state: %w", err)
 	}
+	// Best-effort directory sync persists the rename on supporting systems.
 	if d, err := os.Open(dir); err == nil {
 		_ = d.Sync()
 		_ = d.Close()
@@ -164,6 +179,8 @@ func (l *deliveryLedger) save() error {
 	return nil
 }
 
+// messageKey prefers the first usable Message-ID so Maildir renames do not
+// change identity. Mail without one falls back to a hash of the entire file.
 func messageKey(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -185,6 +202,8 @@ func messageKey(path string) (string, error) {
 	return "sha256:" + hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+// retryDelay doubles the base delay after each failed attempt, checking before
+// multiplication to avoid overflow and capping the result at one day.
 func retryDelay(base time.Duration, attempts int) time.Duration {
 	delay := base
 	for i := 1; i < attempts && delay < maxRetryBackoff; i++ {
@@ -199,6 +218,8 @@ func retryDelay(base time.Duration, attempts int) time.Duration {
 	return delay
 }
 
+// stateError bounds stored diagnostics so repeated failures cannot grow each
+// ledger record without limit.
 func stateError(err error) string {
 	const maxBytes = 4096
 	text := err.Error()

@@ -17,6 +17,8 @@ func (a *commandArgs) Set(value string) error {
 	return nil
 }
 
+// validateMailCommands allows an omitted sync command for externally synced
+// Maildirs, but requires a sender because every generated reply needs transport.
 func validateMailCommands(cfg *config) error {
 	if cfg.CommandTimeout <= 0 {
 		return errors.New("command_timeout must be positive")
@@ -30,6 +32,8 @@ func validateMailCommands(cfg *config) error {
 	return nil
 }
 
+// receiveMail waits for the foreground sync command before allowing a scan.
+// A failed sync aborts the cycle instead of processing a partially updated inbox.
 func receiveMail(ctx context.Context, cfg config) error {
 	if len(cfg.SyncCommand) == 0 {
 		status(cCyan, "SYNC", "scanning existing Maildir; receive command disabled")
@@ -44,6 +48,8 @@ func receiveMail(ctx context.Context, cfg config) error {
 	return nil
 }
 
+// sendCommand expands whole recipient placeholders into separate argv entries;
+// addresses never become shell syntax or fragments of another argument.
 func sendCommand(cfg config, recipients []string) (string, []string) {
 	args := make([]string, 0, len(cfg.SendCommand)-1+len(recipients))
 	for _, arg := range cfg.SendCommand[1:] {
@@ -57,6 +63,8 @@ func sendCommand(cfg config, recipients []string) (string, []string) {
 	return cfg.SendCommand[0], args
 }
 
+// runMailCommand gives each receive/send invocation its own deadline while
+// still honoring cancellation of the enclosing scan.
 func runMailCommand(ctx context.Context, timeout time.Duration, program string, stdin []byte, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
