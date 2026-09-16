@@ -1,6 +1,6 @@
 # janeGPT
 
-![JaneGPT Logo](logo.avif)
+![JaneGPT Logo](logo.png)
 
 Ask local Ollama models questions by email. Jane reads a Maildir, uses configured
 tools and reference material, and replies through your chosen mail program.
