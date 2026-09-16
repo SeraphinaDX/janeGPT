@@ -19,12 +19,16 @@ var (
 	replyPrefixRE = regexp.MustCompile(`(?i)^\s*re\s*:`)
 )
 
+// replyHeaders contains normalized outgoing subject and threading metadata.
+// Threading links messages in mail clients; it does not provide model memory.
 type replyHeaders struct {
 	Subject    string
 	InReplyTo  string
 	References string
 }
 
+// replyRecipients honors Reply-To after the caller has checked the sender.
+// An invalid explicit Reply-To is an error rather than a silent fallback.
 func replyRecipients(header mail.Header, fallback string) ([]string, error) {
 	raw := strings.TrimSpace(header.Get("Reply-To"))
 	if raw == "" {
@@ -53,6 +57,8 @@ func replyRecipients(header mail.Header, fallback string) ([]string, error) {
 	return recipients, nil
 }
 
+// buildReplyHeaders retains the newest bounded References chain and appends
+// the parent Message-ID when it is not already present.
 func buildReplyHeaders(header mail.Header, subjectOverride string) replyHeaders {
 	parentIDs := messageIDs(header.Get("Message-ID"))
 	var parent string
@@ -78,6 +84,8 @@ func buildReplyHeaders(header mail.Header, subjectOverride string) replyHeaders 
 	}
 }
 
+// replySubject preserves an incoming subject, decoding MIME words and adding
+// Re: only when needed. The configured override is solely an empty-subject fallback.
 func replySubject(incoming, override string) string {
 	if strings.TrimSpace(incoming) == "" && strings.TrimSpace(override) != "" {
 		return cleanHeaderText(override)
@@ -96,6 +104,8 @@ func replySubject(incoming, override string) string {
 	return "Re: " + subject
 }
 
+// messageIDs extracts bounded, unique angle-bracket tokens suitable for the
+// threading headers. This is conservative token filtering, not full RFC validation.
 func messageIDs(value string) []string {
 	matches := messageIDRE.FindAllString(value, -1)
 	out := make([]string, 0, len(matches))
@@ -119,6 +129,8 @@ func containsString(values []string, wanted string) bool {
 	return false
 }
 
+// cleanHeaderText collapses whitespace, including CR/LF, into a single line
+// before text is reused in an outgoing header or filename label.
 func cleanHeaderText(value string) string {
 	return strings.Join(strings.Fields(value), " ")
 }

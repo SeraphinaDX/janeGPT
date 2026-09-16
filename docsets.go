@@ -17,6 +17,8 @@ import (
 	"unicode/utf8"
 )
 
+// listDocsets returns case-sensitive names from local .docset directories.
+// Discovery does not download docsets or inspect their documentation pages.
 func listDocsets(root string) ([]string, error) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -31,6 +33,8 @@ func listDocsets(root string) ([]string, error) {
 	return names, nil
 }
 
+// docsetCommand implements the standalone JSON helper used by the built-in
+// Zeal tool. It exports documentation without calling Ollama or sending mail.
 func docsetCommand(args []string, in io.Reader, out io.Writer) error {
 	fs := flag.NewFlagSet("janeGPT docset", flag.ContinueOnError)
 	root := fs.String("root", "", "Zeal docset storage directory")
@@ -76,11 +80,16 @@ func docsetCommand(args []string, in io.Reader, out io.Writer) error {
 	return json.NewEncoder(out).Encode(result)
 }
 
+// docPage keeps a source label and HTML alongside a query score. Scoring affects
+// only the model excerpt; every page still belongs in both attachment exports.
 type docPage struct {
 	name, source string
 	score        int
 }
 
+// exportDocset converts every supported HTML page to complete Markdown and Org
+// exports, then builds a separate bounded excerpt for the model. Any read or
+// conversion failure aborts the result rather than returning partial attachments.
 func exportDocset(ctx context.Context, root, name, query, pandoc string, maxBytes, contextBytes int64) (toolResult, error) {
 	names, err := listDocsets(root)
 	if err != nil {
@@ -199,6 +208,8 @@ func exportDocset(ctx context.Context, root, name, query, pandoc string, maxByte
 	// Rank only the model context. Both attachment exports above contain every page.
 	sort.SliceStable(pages, func(i, j int) bool { return pages[i].score > pages[j].score })
 	var selected strings.Builder
+	// Select whole HTML pages using a rough source budget, then enforce the
+	// exact UTF-8 text budget after conversion. The last page may exceed it.
 	budget := contextBytes * 2
 	for _, p := range pages {
 		if int64(selected.Len()) >= budget {
